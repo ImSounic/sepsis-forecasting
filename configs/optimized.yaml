@@ -1,5 +1,5 @@
 # Sepsis Forecasting - Optimized Configuration
-# Based on hyperopt Trial 0 (best utility from Optuna search)
+# Based on Optuna Trial 8 (best utility: 0.329)
 # GRU + Temporal Attention (bidirectional)
 
 # Data
@@ -12,22 +12,22 @@ data:
 # Model
 model:
   input_size: 120
-  hidden_size: 128
+  hidden_size: 256
   num_layers: 1
-  dropout: 0.3
+  dropout: 0.1
   bidirectional: true
   attention_size: 64
 
 # Training
 training:
-  batch_size: 64
+  batch_size: 32
   epochs: 50
-  lr: 0.0026
+  lr: 0.00095
   weight_decay: 0.0001
   patience: 10
   gradient_clip: 1.0
   pos_weight: auto
-  pos_weight_multiplier: 2.0
+  pos_weight_multiplier: 0.5
   mixed_precision: true
   num_workers: 4
   scheduler_patience: 5
