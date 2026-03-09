@@ -101,13 +101,6 @@ pip install torch torchvision torchaudio --index-url https://download.pytorch.or
 pip install -r requirements.txt
 ```
 
-### Data
-Download the PhysioNet 2019 Challenge data (requires free PhysioNet account):
-1. Register at https://physionet.org
-2. Complete required training
-3. Download training_setA and training_setB
-4. Place contents in `data/raw/`
-
 ## Usage
 
 ```bash
