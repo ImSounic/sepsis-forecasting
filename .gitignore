@@ -1,0 +1,85 @@
+# Claude Code - KEEP LOCAL ONLY
+.claude/
+CLAUDE.md
+claude.md
+
+# Python virtual environment
+.venv/
+venv/
+env/
+ENV/
+
+# Data - too large for git
+data/raw/
+data/processed/
+data/splits/
+*.psv
+*.csv
+*.parquet
+*.h5
+*.hdf5
+*.npy
+*.npz
+data/**/*.pkl
+data/**/*.pickle
+
+# Model checkpoints (not in outputs/)
+*.pth
+*.ckpt
+*.bin
+wandb/
+mlruns/
+
+# Outputs - logs only (models and figures are tracked)
+outputs/logs/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb_checkpoints
+.jupyter/
+
+# IDE and editor
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# Testing and coverage
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.nox/
+
+# Misc
+*.log
+*.tmp
+*.temp
+.env
+.envrc
+secrets.yaml

@@ -1,0 +1,50 @@
+# Sepsis Forecasting - Default Configuration
+# PhysioNet/CinC 2019 Challenge
+# GRU + Temporal Attention
+
+# Data
+data:
+  raw_dir: data/raw
+  # Sliding window length (hours of history per prediction)
+  seq_length: 24
+  # Fraction of patients held out for validation
+  val_split: 0.15
+  # Limit patients loaded per directory (null = load all)
+  max_patients: null
+
+# Model
+model:
+  # 40 raw + 40 masks + 40 time-since = 120
+  input_size: 120
+  hidden_size: 128
+  num_layers: 2
+  dropout: 0.3
+  bidirectional: false
+  attention_size: 64
+
+# Training
+training:
+  batch_size: 64
+  epochs: 50
+  lr: 0.001
+  weight_decay: 0.0001
+  # Early stopping patience (epochs without utility improvement)
+  patience: 10
+  gradient_clip: 1.0
+  # Positive class weight: 'auto' computes from class distribution (~1.8% sepsis)
+  pos_weight: auto
+  mixed_precision: true
+  num_workers: 4
+  # ReduceLROnPlateau scheduler
+  scheduler_patience: 5
+  scheduler_factor: 0.5
+  min_lr: 0.00001
+
+# Output
+output:
+  model_dir: outputs/models
+  log_dir: outputs/logs
+
+# Reproducibility
+seed: 42
+device: auto
