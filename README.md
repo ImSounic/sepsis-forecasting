@@ -6,8 +6,8 @@ Early prediction of sepsis using deep learning on the [PhysioNet/Computing in Ca
 
 | Model | Utility Score | Threshold | Parameters |
 |-------|--------------|-----------|------------|
-| GRU + Attention (Optuna best) | **0.329** | TBD | ~350K |
-| GRU + Attention (optimized.yaml) | 0.322 | 0.65 | 225K |
+| GRU + Attention (optimized.yaml) | **0.337** | 0.40 | 647K |
+| GRU + Attention (previous optimized) | 0.322 | 0.65 | 225K |
 | GRU + Attention (default.yaml) | 0.176 | 0.90 | 212K |
 | LightGBM Baseline | 0.137 | 0.15 | N/A |
 
@@ -53,10 +53,11 @@ Top 10 features by importance (gain):
 
 ## GRU + Attention (Optimized)
 
-- **Utility**: 0.322 (threshold: 0.65)
-- **Parameters**: 225,265 (all trainable)
-- **Training**: 36 epochs (early stopping at epoch 26), ~70 minutes
-- **Validation loss**: 1.3134
+- **Utility**: 0.3374 (threshold: 0.40)
+- **Parameters**: 646,641 (all trainable)
+- **Config**: hidden=256, layers=1, dropout=0.1, lr=0.00095, batch=32, bidir=True, pw_mult=0.5
+- **Training**: 47 epochs (early stopping, best at epoch 37), ~70 minutes
+- **Validation loss**: 1.9030
 - **Positive class weight**: 54.86
 
 ## Hyperparameter Optimization (Optuna)
@@ -138,8 +139,8 @@ sepsis-forecasting/
 │   └── explainability/   # SHAP analysis, attention visualization
 ├── configs/
 │   ├── default.yaml      # Base configuration
-│   ├── optimized.yaml    # Optimized hyperparameters (Trial 0)
-│   └── best.yaml         # Best hyperparameters from Optuna (Trial 8)
+│   ├── optimized.yaml    # Best hyperparameters from Optuna (Trial 8)
+│   └── best.yaml         # Copy of optimized (Optuna Trial 8)
 ├── tests/                # Unit tests
 └── outputs/              # Models, figures, logs (gitignored)
 ```
