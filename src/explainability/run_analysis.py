@@ -4,8 +4,8 @@ Generates attention visualizations, SHAP feature importance, and
 comparison with LightGBM baseline. All plots saved to outputs/figures/.
 
 Usage:
-    python -m src.explainability.run_analysis --config configs/default.yaml
-    python -m src.explainability.run_analysis --config configs/default.yaml --skip-shap
+    python -m src.explainability.run_analysis --config configs/optimized.yaml
+    python -m src.explainability.run_analysis --config configs/optimized.yaml --skip-shap
 """
 
 import argparse
@@ -35,6 +35,9 @@ from src.training.train import load_config
 
 
 FIGURES_DIR = "outputs/figures"
+N_PATIENT_EXAMPLES = 5  # per category (TP, FP, TN, FN)
+SHAP_BACKGROUND = 500
+SHAP_TEST = 200
 
 
 def load_model_and_data(config):
@@ -57,10 +60,11 @@ def load_model_and_data(config):
     seq_length = config["data"]["seq_length"]
     val_dataset = SepsisDataset(val_processed, seq_length=seq_length)
     val_loader = torch.utils.data.DataLoader(
-        val_dataset, batch_size=64, shuffle=False, num_workers=0,
+        val_dataset, batch_size=256, shuffle=False, num_workers=0,
     )
     feature_columns = val_dataset.feature_columns
-    print(f"Validation: {len(val_dataset)} samples, {len(feature_columns)} features, seq_length={seq_length}")
+    print(f"Validation: {len(val_dataset):,} samples, {len(feature_columns)} features, "
+          f"seq_length={seq_length}")
 
     checkpoint_path = os.path.join(config["output"]["model_dir"], "best.pt")
     if not os.path.exists(checkpoint_path):
@@ -116,32 +120,73 @@ def print_model_summary(model, config, checkpoint, feature_columns, val_dataset_
         print(f"  {name:40s}  {str(list(param.shape)):20s}  {param.numel():>8,}")
 
 
+def print_classification_summary(preds, labels, threshold):
+    """Print TP/FP/TN/FN counts, precision, recall, F1, and confusion matrix."""
+    binary_preds = (np.array(preds) >= threshold).astype(int)
+    binary_labels = np.array(labels).astype(int)
+
+    tp = int(((binary_preds == 1) & (binary_labels == 1)).sum())
+    fp = int(((binary_preds == 1) & (binary_labels == 0)).sum())
+    tn = int(((binary_preds == 0) & (binary_labels == 0)).sum())
+    fn = int(((binary_preds == 0) & (binary_labels == 1)).sum())
+
+    precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+    recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+    f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0.0
+
+    print(f"\n  Classification Summary (threshold={threshold:.2f}):")
+    print(f"    TP: {tp:>8,}    FP: {fp:>8,}")
+    print(f"    FN: {fn:>8,}    TN: {tn:>8,}")
+    print(f"    Total: {tp + fp + tn + fn:,}")
+    print(f"\n    Precision:  {precision:.4f}")
+    print(f"    Recall:     {recall:.4f}")
+    print(f"    F1 Score:   {f1:.4f}")
+
+    print(f"\n  Confusion Matrix:")
+    print(f"                    Predicted")
+    print(f"                  Pos        Neg")
+    print(f"    Actual Pos  {tp:>8,}   {fn:>8,}")
+    print(f"    Actual Neg  {fp:>8,}   {tn:>8,}")
+
+    return {"tp": tp, "fp": fp, "tn": tn, "fn": fn,
+            "precision": precision, "recall": recall, "f1": f1}
+
+
 def run_attention_analysis(model, val_loader, val_processed, feature_columns,
                            checkpoint, device):
-    """Extract attention weights and generate all attention plots."""
+    """Extract attention weights from full validation set and generate plots."""
     seq_length = len(next(iter(val_loader))[0][0])
+    threshold = checkpoint["threshold"]
 
     print("\n" + "=" * 60)
-    print("ATTENTION ANALYSIS")
+    print("ATTENTION ANALYSIS (full validation set)")
     print("=" * 60)
 
-    attn_data = extract_attention_weights(model, val_loader, device=device, num_samples=100)
+    print("Running inference on all validation samples...")
+    attn_data = extract_attention_weights(
+        model, val_loader, device=device, num_samples=None, show_progress=True,
+    )
 
     preds = np.array(attn_data["predictions"])
     labels = np.array(attn_data["labels"])
     all_attn = np.array(attn_data["attention_weights"])
 
-    print(f"Extracted {len(preds)} samples")
-    print(f"  Positive labels: {int(labels.sum())}")
+    print(f"\nExtracted {len(preds):,} samples")
+    print(f"  Positive labels: {int(labels.sum()):,}")
+    print(f"  Negative labels: {int((labels == 0).sum()):,}")
     if labels.sum() > 0:
         print(f"  Mean prediction (positive): {preds[labels==1].mean():.4f}")
     if (labels == 0).sum() > 0:
         print(f"  Mean prediction (negative): {preds[labels==0].mean():.4f}")
 
-    # Attention distribution by TP/FP/TN/FN
+    # Classification summary
+    stats = print_classification_summary(preds, labels, threshold)
+
+    # Attention distribution by TP/FP/TN/FN using the model's threshold
     fig = plot_attention_distribution(
         attn_data,
         save_path=os.path.join(FIGURES_DIR, "attention_distribution.png"),
+        threshold=threshold,
     )
     plt.close(fig)
 
@@ -151,25 +196,25 @@ def run_attention_analysis(model, val_loader, val_processed, feature_columns,
     ax.bar(range(len(mean_attn)), mean_attn, color="steelblue", alpha=0.8)
     ax.set_xlabel("Hour in window (0=oldest)")
     ax.set_ylabel("Mean attention weight")
-    ax.set_title("Average Attention by Hour (All Samples)")
+    ax.set_title(f"Average Attention by Hour ({len(preds):,} samples)")
     ax.grid(True, axis="y", alpha=0.3)
     fig.tight_layout()
-    fig.savefig(os.path.join(FIGURES_DIR, "mean_attention_by_hour.png"), dpi=150, bbox_inches="tight")
+    fig.savefig(os.path.join(FIGURES_DIR, "mean_attention_by_hour.png"),
+                dpi=150, bbox_inches="tight")
     plt.close(fig)
 
     peak_hour = int(np.argmax(mean_attn))
-    print(f"Peak attention at hour {peak_hour} ({seq_length - peak_hour - 1} hours before prediction)")
+    print(f"\n  Peak attention at hour {peak_hour} "
+          f"({seq_length - peak_hour - 1} hours before prediction)")
     attn_last3 = mean_attn[-3:].sum()
-    print(f"Attention on last 3 hours: {attn_last3:.3f} ({attn_last3/mean_attn.sum()*100:.1f}% of total)")
+    print(f"  Attention on last 3 hours: {attn_last3:.3f} "
+          f"({attn_last3/mean_attn.sum()*100:.1f}% of total)")
 
-    # Individual patient examples
-    print("\nGenerating patient attention plots...")
-    threshold = checkpoint["threshold"]
-
+    # Categorize all samples
     categories = {"TP": [], "FP": [], "TN": [], "FN": []}
-    for i, (pred, label) in enumerate(zip(preds, labels)):
-        bp = 1 if pred >= threshold else 0
-        bl = int(label)
+    binary_preds = (preds >= threshold).astype(int)
+    for i in range(len(preds)):
+        bp, bl = binary_preds[i], int(labels[i])
         if bp == 1 and bl == 1:
             categories["TP"].append(i)
         elif bp == 1 and bl == 0:
@@ -179,41 +224,87 @@ def run_attention_analysis(model, val_loader, val_processed, feature_columns,
         else:
             categories["FN"].append(i)
 
-    for cat, indices in categories.items():
-        print(f"  {cat}: {len(indices)} samples")
-
-    examples = []
+    # Generate 5 patient attention plots per category (20 total)
+    print(f"\nGenerating {N_PATIENT_EXAMPLES} patient plots per category "
+          f"(TP/FP/TN/FN)...")
     for cat in ["TP", "FP", "TN", "FN"]:
-        if categories[cat]:
-            examples.append((cat, categories[cat][0]))
+        indices = categories[cat]
+        n_examples = min(N_PATIENT_EXAMPLES, len(indices))
+        if n_examples == 0:
+            print(f"  {cat}: no samples available")
+            continue
+
+        # Spread examples across the category for diversity
+        if len(indices) > n_examples:
+            step = len(indices) // n_examples
+            selected = [indices[i * step] for i in range(n_examples)]
+        else:
+            selected = indices[:n_examples]
+
+        for rank, idx in enumerate(selected, 1):
+            pid = attn_data["patient_ids"][idx]
+            hour = attn_data["hour_indices"][idx]
+            pred = attn_data["predictions"][idx]
+            label = int(attn_data["labels"][idx])
+            attn = np.array(attn_data["attention_weights"][idx])
+
+            patient_df = val_processed[pid]
+            start = max(0, hour + 1 - seq_length)
+            end = hour + 1
+            window = patient_df[feature_columns].iloc[start:end].values.astype(
+                np.float32)
+
+            if window.shape[0] < seq_length:
+                pad = np.zeros(
+                    (seq_length - window.shape[0], window.shape[1]),
+                    dtype=np.float32,
+                )
+                window = np.vstack([pad, window])
+
+            save_path = os.path.join(
+                FIGURES_DIR,
+                f"patient_attention_{cat.lower()}_{rank}_{pid}.png",
+            )
+            fig = plot_patient_attention(
+                window, attn, feature_columns, save_path=save_path,
+            )
+            fig.suptitle(
+                f"{cat} #{rank}: Patient {pid} | Hour {hour} | "
+                f"Pred: {pred:.3f} | Label: {label}",
+                fontsize=11, y=0.98,
+            )
+            fig.savefig(save_path, dpi=150, bbox_inches="tight")
+            plt.close(fig)
+
+        print(f"  {cat}: {n_examples} plots saved")
+
+    # Highest prediction example
     top_pred_idx = int(np.argmax(preds))
-    examples.append(("Highest_pred", top_pred_idx))
+    pid = attn_data["patient_ids"][top_pred_idx]
+    hour = attn_data["hour_indices"][top_pred_idx]
+    pred = attn_data["predictions"][top_pred_idx]
+    label = int(attn_data["labels"][top_pred_idx])
+    attn = np.array(attn_data["attention_weights"][top_pred_idx])
 
-    for tag, idx in examples:
-        pid = attn_data["patient_ids"][idx]
-        hour = attn_data["hour_indices"][idx]
-        pred = attn_data["predictions"][idx]
-        label = int(attn_data["labels"][idx])
-        attn = np.array(attn_data["attention_weights"][idx])
+    patient_df = val_processed[pid]
+    start = max(0, hour + 1 - seq_length)
+    end = hour + 1
+    window = patient_df[feature_columns].iloc[start:end].values.astype(np.float32)
+    if window.shape[0] < seq_length:
+        pad = np.zeros((seq_length - window.shape[0], window.shape[1]),
+                        dtype=np.float32)
+        window = np.vstack([pad, window])
 
-        patient_df = val_processed[pid]
-        start = max(0, hour + 1 - seq_length)
-        end = hour + 1
-        window = patient_df[feature_columns].iloc[start:end].values.astype(np.float32)
-
-        if window.shape[0] < seq_length:
-            pad = np.zeros((seq_length - window.shape[0], window.shape[1]), dtype=np.float32)
-            window = np.vstack([pad, window])
-
-        save_path = os.path.join(FIGURES_DIR, f"patient_attention_{tag.lower()}_{pid}.png")
-        fig = plot_patient_attention(window, attn, feature_columns, save_path=save_path)
-        fig.suptitle(
-            f"{tag}: Patient {pid} | Hour {hour} | Pred: {pred:.3f} | Label: {label}",
-            fontsize=11, y=0.98,
-        )
-        fig.savefig(save_path, dpi=150, bbox_inches="tight")
-        plt.close(fig)
-        print(f"  {tag}: Patient {pid}, Hour {hour}, Pred={pred:.3f}, Label={label}")
+    save_path = os.path.join(FIGURES_DIR, f"patient_attention_highest_pred_{pid}.png")
+    fig = plot_patient_attention(window, attn, feature_columns, save_path=save_path)
+    fig.suptitle(
+        f"Highest Pred: Patient {pid} | Hour {hour} | "
+        f"Pred: {pred:.3f} | Label: {label}",
+        fontsize=11, y=0.98,
+    )
+    fig.savefig(save_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print(f"  Highest pred: Patient {pid}, Pred={pred:.3f}, Label={label}")
 
     return attn_data
 
@@ -221,6 +312,7 @@ def run_attention_analysis(model, val_loader, val_processed, feature_columns,
 def run_shap_analysis(model, val_loader, train_processed, feature_columns, device):
     """Compute SHAP values and generate importance plots.
 
+    Uses 500 background samples and 200 test samples.
     Returns (shap_vals, mean_abs_shap) for use in comparison.
     """
     from src.explainability.shap_analysis import (
@@ -235,32 +327,34 @@ def run_shap_analysis(model, val_loader, train_processed, feature_columns, devic
     print("SHAP ANALYSIS")
     print("=" * 60)
 
-    print("Collecting background samples from training data...")
+    print(f"Collecting {SHAP_BACKGROUND} background samples from training data...")
     train_dataset = SepsisDataset(train_processed, seq_length=seq_length)
     train_loader_bg = torch.utils.data.DataLoader(
-        train_dataset, batch_size=200, shuffle=True, num_workers=0,
+        train_dataset, batch_size=SHAP_BACKGROUND, shuffle=True, num_workers=0,
     )
     bg_features, _, _, _, _ = next(iter(train_loader_bg))
-    print(f"Background samples: {bg_features.shape}")
+    bg_features = bg_features[:SHAP_BACKGROUND]
+    print(f"  Background samples: {bg_features.shape}")
 
-    print("Collecting test samples from validation data...")
+    print(f"Collecting {SHAP_TEST} test samples from validation data...")
     test_features_list = []
     n_collected = 0
     for features, _, _, _, _ in val_loader:
         test_features_list.append(features)
         n_collected += features.shape[0]
-        if n_collected >= 50:
+        if n_collected >= SHAP_TEST:
             break
-    test_features = torch.cat(test_features_list, dim=0)[:50]
-    print(f"Test samples: {test_features.shape}")
+    test_features = torch.cat(test_features_list, dim=0)[:SHAP_TEST]
+    print(f"  Test samples: {test_features.shape}")
 
-    print("Computing SHAP values (this may take a few minutes)...")
+    print(f"Computing SHAP values ({SHAP_BACKGROUND} bg, {SHAP_TEST} test)...")
+    print("  This may take several minutes...")
     shap_result = compute_shap_values(
         model, bg_features, test_features,
-        device=device, num_samples=50,
+        device=device, num_samples=SHAP_TEST,
     )
     shap_vals = shap_result["shap_values"]
-    print(f"SHAP values shape: {shap_vals.shape}")
+    print(f"  SHAP values shape: {shap_vals.shape}")
 
     fig = plot_feature_importance_shap(
         shap_vals, feature_columns, top_k=20,
@@ -342,7 +436,8 @@ def run_baseline_comparison(feature_columns, mean_abs_shap, config):
 
     fig.suptitle("Feature Importance: GRU+Attention vs LightGBM", fontsize=12)
     fig.tight_layout(rect=[0, 0, 1, 0.95])
-    fig.savefig(os.path.join(FIGURES_DIR, "feature_importance_comparison.png"), dpi=150, bbox_inches="tight")
+    fig.savefig(os.path.join(FIGURES_DIR, "feature_importance_comparison.png"),
+                dpi=150, bbox_inches="tight")
     plt.close(fig)
 
     gru_top_set = set(gru_top20["feature"].values)
@@ -376,7 +471,7 @@ Key questions:
 Figures saved to: {figures_dir}/
   - attention_distribution.png       Attention by TP/FP/TN/FN
   - mean_attention_by_hour.png       Average attention across samples
-  - patient_attention_*.png          Individual patient overlays
+  - patient_attention_*.png          Individual patient overlays (20 total)
   - shap_feature_importance.png      Top 20 SHAP features
   - shap_temporal_importance.png     Importance by hour
   - feature_importance_comparison.png  GRU vs LightGBM
