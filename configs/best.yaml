@@ -1,0 +1,44 @@
+# Sepsis Forecasting - Best Configuration
+# Optuna Trial 8 (best utility: 0.329)
+# GRU + Temporal Attention (bidirectional)
+
+# Data
+data:
+  raw_dir: data/raw
+  seq_length: 24
+  val_split: 0.15
+  max_patients: null
+
+# Model
+model:
+  input_size: 120
+  hidden_size: 256
+  num_layers: 1
+  dropout: 0.1
+  bidirectional: true
+  attention_size: 64
+
+# Training
+training:
+  batch_size: 32
+  epochs: 50
+  lr: 0.00095
+  weight_decay: 0.0001
+  patience: 10
+  gradient_clip: 1.0
+  pos_weight: auto
+  pos_weight_multiplier: 0.5
+  mixed_precision: true
+  num_workers: 4
+  scheduler_patience: 5
+  scheduler_factor: 0.5
+  min_lr: 0.00001
+
+# Output
+output:
+  model_dir: outputs/models
+  log_dir: outputs/logs
+
+# Reproducibility
+seed: 42
+device: auto
