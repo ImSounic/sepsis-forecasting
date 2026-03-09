@@ -14,14 +14,16 @@ from src.data.preprocessing import VITAL_SIGNS
 logger = logging.getLogger("sepsis")
 
 
-def extract_attention_weights(model, dataloader, device="cpu", num_samples=100):
+def extract_attention_weights(model, dataloader, device="cpu", num_samples=None,
+                              show_progress=False):
     """Run model on samples and collect attention weights.
 
     Args:
         model: Trained GRUWithAttention model.
         dataloader: DataLoader yielding (features, labels, masks, pids, hours).
         device: Torch device string.
-        num_samples: Max samples to collect.
+        num_samples: Max samples to collect. None = all samples.
+        show_progress: If True, print progress every 1000 batches.
 
     Returns:
         Dict with keys: patient_ids, hour_indices, attention_weights,
@@ -38,10 +40,11 @@ def extract_attention_weights(model, dataloader, device="cpu", num_samples=100):
         "labels": [],
     }
     collected = 0
+    total_batches = len(dataloader)
 
     with torch.no_grad():
-        for features, labels, masks, pids, hours in dataloader:
-            if collected >= num_samples:
+        for batch_idx, (features, labels, masks, pids, hours) in enumerate(dataloader):
+            if num_samples is not None and collected >= num_samples:
                 break
 
             features = features.to(device)
@@ -49,8 +52,11 @@ def extract_attention_weights(model, dataloader, device="cpu", num_samples=100):
             probs, attn = model.predict_proba(features, padding_mask=masks)
 
             batch_size = features.size(0)
-            remaining = num_samples - collected
-            n = min(batch_size, remaining)
+            if num_samples is not None:
+                remaining = num_samples - collected
+                n = min(batch_size, remaining)
+            else:
+                n = batch_size
 
             result["patient_ids"].extend(list(pids[:n]))
             result["hour_indices"].extend([int(h) for h in hours[:n]])
@@ -59,6 +65,10 @@ def extract_attention_weights(model, dataloader, device="cpu", num_samples=100):
             result["labels"].extend(labels[:n].numpy().tolist())
 
             collected += n
+
+            if show_progress and (batch_idx + 1) % 500 == 0:
+                print(f"  Progress: {batch_idx + 1}/{total_batches} batches "
+                      f"({collected:,} samples)")
 
     logger.info("Extracted attention weights for %d samples", collected)
     return result
@@ -130,7 +140,7 @@ def plot_patient_attention(patient_data, attention_weights, feature_names, save_
     return fig
 
 
-def plot_attention_distribution(attention_data, save_path=None):
+def plot_attention_distribution(attention_data, save_path=None, threshold=0.5):
     """Aggregate attention patterns across patients by outcome category.
 
     Shows average attention by hour-before-prediction for TP, FP, TN, FN.
@@ -138,6 +148,7 @@ def plot_attention_distribution(attention_data, save_path=None):
     Args:
         attention_data: Dict from extract_attention_weights().
         save_path: If provided, save figure to this path.
+        threshold: Classification threshold for binary predictions.
 
     Returns:
         matplotlib Figure.
@@ -149,7 +160,7 @@ def plot_attention_distribution(attention_data, save_path=None):
         attention_data["predictions"],
         attention_data["labels"],
     ):
-        binary_pred = 1 if pred >= 0.5 else 0
+        binary_pred = 1 if pred >= threshold else 0
         binary_label = int(label)
 
         if binary_pred == 1 and binary_label == 1:
