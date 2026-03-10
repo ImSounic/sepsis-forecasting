@@ -243,7 +243,7 @@ class LightGBMBaseline:
         "feature_fraction": 0.8,
         "bagging_fraction": 0.8,
         "bagging_freq": 5,
-        "min_child_samples": 50,
+        "min_data_in_leaf": 100,
         "reg_alpha": 0.01,
         "reg_lambda": 0.01,
         "is_unbalance": True,
@@ -262,11 +262,16 @@ class LightGBMBaseline:
 
     def fit(self, X_train, y_train, X_val=None, y_val=None, num_boost_round=None,
             early_stopping_rounds=None, feature_names=None):
-        """Train the model with optional early stopping on validation set."""
+        """Train the model with optional early stopping on validation set.
+
+        For improved/enhanced mode, early stopping is disabled and a fixed
+        number of trees (500) are trained. Validation loss is monitored
+        for logging only.
+        """
         if num_boost_round is None:
-            num_boost_round = 3000 if self.enhanced else 1000
+            num_boost_round = 500 if self.enhanced else 1000
         if early_stopping_rounds is None:
-            early_stopping_rounds = 100 if self.enhanced else 50
+            early_stopping_rounds = None if self.enhanced else 50
 
         self.feature_names = feature_names
         dtrain = lgb.Dataset(X_train, label=y_train, feature_name=feature_names)
@@ -279,11 +284,14 @@ class LightGBMBaseline:
             dval = lgb.Dataset(X_val, label=y_val, feature_name=feature_names, reference=dtrain)
             valid_sets.append(dval)
             valid_names.append("val")
-            callbacks.append(lgb.early_stopping(early_stopping_rounds))
+            # Only add early stopping for non-enhanced mode
+            if early_stopping_rounds is not None:
+                callbacks.append(lgb.early_stopping(early_stopping_rounds))
 
+        es_str = str(early_stopping_rounds) if early_stopping_rounds else "disabled"
         print(f"  LightGBM params: leaves={self.params['num_leaves']}, "
               f"lr={self.params['learning_rate']}, rounds={num_boost_round}, "
-              f"early_stop={early_stopping_rounds}")
+              f"early_stop={es_str}")
 
         self.model = lgb.train(
             self.params,
@@ -293,6 +301,7 @@ class LightGBMBaseline:
             valid_names=valid_names,
             callbacks=callbacks,
         )
+        print(f"  Trained {self.model.num_trees()} trees")
 
     def predict_proba(self, X):
         """Return predicted probabilities."""
