@@ -126,26 +126,40 @@ def print_model_summary(model, config, checkpoint, feature_columns, val_dataset_
 
 
 def print_classification_summary(preds, labels, threshold):
-    """Print TP/FP/TN/FN counts, precision, recall, F1, and confusion matrix."""
-    binary_preds = (np.array(preds) >= threshold).astype(int)
+    """Print TP/FP/TN/FN counts, precision, recall, F1, AUROC, AUPRC, and confusion matrix."""
+    from sklearn.metrics import roc_auc_score, average_precision_score
+
+    preds_arr = np.array(preds)
+    binary_preds = (preds_arr >= threshold).astype(int)
     binary_labels = np.array(labels).astype(int)
 
     tp = int(((binary_preds == 1) & (binary_labels == 1)).sum())
     fp = int(((binary_preds == 1) & (binary_labels == 0)).sum())
     tn = int(((binary_preds == 0) & (binary_labels == 0)).sum())
     fn = int(((binary_preds == 0) & (binary_labels == 1)).sum())
+    total = tp + fp + tn + fn
 
     precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
     recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+    specificity = tn / (tn + fp) if (tn + fp) > 0 else 0.0
     f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0.0
+    accuracy = (tp + tn) / total if total > 0 else 0.0
+
+    auroc = roc_auc_score(binary_labels, preds_arr)
+    auprc = average_precision_score(binary_labels, preds_arr)
 
     print(f"\n  Classification Summary (threshold={threshold:.2f}):")
     print(f"    TP: {tp:>8,}    FP: {fp:>8,}")
     print(f"    FN: {fn:>8,}    TN: {tn:>8,}")
-    print(f"    Total: {tp + fp + tn + fn:,}")
-    print(f"\n    Precision:  {precision:.4f}")
-    print(f"    Recall:     {recall:.4f}")
-    print(f"    F1 Score:   {f1:.4f}")
+    print(f"    Total: {total:,}")
+
+    print(f"\n    Precision:    {precision:.4f}")
+    print(f"    Recall:       {recall:.4f}")
+    print(f"    Specificity:  {specificity:.4f}")
+    print(f"    F1 Score:     {f1:.4f}")
+    print(f"    Accuracy:     {accuracy:.4f}")
+    print(f"    AUROC:        {auroc:.4f}")
+    print(f"    AUPRC:        {auprc:.4f}")
 
     print(f"\n  Confusion Matrix:")
     print(f"                    Predicted")
@@ -154,7 +168,8 @@ def print_classification_summary(preds, labels, threshold):
     print(f"    Actual Neg  {fp:>8,}   {tn:>8,}")
 
     return {"tp": tp, "fp": fp, "tn": tn, "fn": fn,
-            "precision": precision, "recall": recall, "f1": f1}
+            "precision": precision, "recall": recall, "specificity": specificity,
+            "f1": f1, "accuracy": accuracy, "auroc": auroc, "auprc": auprc}
 
 
 def run_attention_analysis(model, val_loader, val_processed, feature_columns,
