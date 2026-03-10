@@ -120,7 +120,9 @@ def run_full_analysis(name, probs, labels, pids, hours, threshold,
     _print_agreement_analysis(gru_probs, lgb_probs, labels_arr, threshold)
 
     # Save ensemble predictions
-    save_path = os.path.join(model_dir, "ensemble_predictions.pkl")
+    ens_dir = os.path.join(model_dir, "ensemble")
+    os.makedirs(ens_dir, exist_ok=True)
+    save_path = os.path.join(ens_dir, "ensemble_predictions.pkl")
     with open(save_path, "wb") as f:
         pickle.dump({
             "strategy": name,
@@ -321,7 +323,16 @@ def main(config_path, full_analysis=False):
     print(f"Validation samples: {len(val_dataset):,}")
 
     # Load GRU model
-    checkpoint_path = os.path.join(config["output"]["model_dir"], "best.pt")
+    gru_dir = os.path.join(config["output"]["model_dir"], "gru")
+    checkpoint_path = os.path.join(gru_dir, "best.pt")
+    if not os.path.exists(checkpoint_path):
+        import glob
+        pt_files = glob.glob(os.path.join(gru_dir, "*.pt"))
+        if pt_files:
+            checkpoint_path = pt_files[0]
+        else:
+            print(f"ERROR: No GRU checkpoint in {gru_dir}")
+            return
     checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=True)
 
     model = GRUWithAttention(
@@ -344,8 +355,9 @@ def main(config_path, full_analysis=False):
 
     # Load LightGBM model (prefer improved, fall back to baseline)
     model_dir = config["output"]["model_dir"]
-    improved_path = os.path.join(model_dir, "lightgbm_improved.pkl")
-    baseline_path = os.path.join(model_dir, "baseline.pkl")
+    lgb_dir = os.path.join(model_dir, "lightgbm")
+    improved_path = os.path.join(lgb_dir, "lightgbm_improved.pkl")
+    baseline_path = os.path.join(lgb_dir, "lightgbm_baseline.pkl")
 
     if os.path.exists(improved_path):
         lgb_model = LightGBMBaseline.load(improved_path)
