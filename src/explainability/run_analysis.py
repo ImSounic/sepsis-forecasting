@@ -567,7 +567,7 @@ def run_shap_analysis(model, val_loader, train_processed, feature_columns, devic
 
 def run_baseline_comparison(feature_columns, mean_abs_shap, config):
     """Compare GRU SHAP importance with LightGBM feature importance."""
-    from src.models.baseline import LightGBMBaseline
+    from src.models.lightgbm_model import LightGBMBaseline
 
     print("\n" + "=" * 60)
     print("BASELINE COMPARISON")
