@@ -41,8 +41,8 @@ SHAP_DIR = os.path.join(FIGURES_DIR, "shap")
 COMPARISON_DIR = os.path.join(FIGURES_DIR, "comparison")
 
 N_PATIENT_EXAMPLES = 5  # per category (TP, FP, TN, FN)
-SHAP_BACKGROUND = 500
-SHAP_TEST = 200
+SHAP_BACKGROUND = 1000
+SHAP_TEST = 1000
 
 
 def load_model_and_data(config):
