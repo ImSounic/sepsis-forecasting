@@ -106,20 +106,30 @@ def main(config_path):
     gru_probs, labels, pids, hours = get_gru_predictions(model, val_loader, device)
     print(f"  {len(gru_probs):,} predictions collected")
 
-    # Load LightGBM model
-    baseline_path = os.path.join(config["output"]["model_dir"], "baseline.pkl")
-    if not os.path.exists(baseline_path):
-        print(f"\nERROR: No LightGBM model at {baseline_path}")
+    # Load LightGBM model (prefer improved, fall back to baseline)
+    model_dir = config["output"]["model_dir"]
+    improved_path = os.path.join(model_dir, "lightgbm_improved.pkl")
+    baseline_path = os.path.join(model_dir, "baseline.pkl")
+
+    if os.path.exists(improved_path):
+        lgb_model = LightGBMBaseline.load(improved_path)
+        lgb_enhanced = lgb_model.enhanced
+        print(f"Loaded improved LightGBM ({lgb_model.model.num_trees()} trees, "
+              f"enhanced={lgb_enhanced})")
+    elif os.path.exists(baseline_path):
+        lgb_model = LightGBMBaseline.load(baseline_path)
+        lgb_enhanced = lgb_model.enhanced
+        print(f"Loaded LightGBM baseline ({lgb_model.model.num_trees()} trees, "
+              f"enhanced={lgb_enhanced})")
+    else:
+        print(f"\nERROR: No LightGBM model found in {model_dir}")
         print("Run: python -m src.training.train_baseline --config configs/default.yaml")
         return
-
-    lgb_model = LightGBMBaseline.load(baseline_path)
-    print(f"Loaded LightGBM baseline ({lgb_model.model.num_trees()} trees)")
 
     # LightGBM predictions (same sample order as GRU since both iterate dict order)
     print("Preparing LightGBM features...")
     X_lgb, y_lgb, lgb_pids, lgb_hours = prepare_baseline_data(
-        val_processed, feature_columns,
+        val_processed, feature_columns, enhanced=lgb_enhanced,
     )
     print(f"  LightGBM features: {X_lgb.shape}")
 
