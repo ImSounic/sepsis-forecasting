@@ -19,7 +19,14 @@ from src.data.cache import get_cache_path, is_cache_valid, load_preprocessed, sa
 from src.data.dataset import get_train_val_split
 from src.data.feature_engineering import INPUT_FEATURES
 from src.data.preprocessing import TARGET, load_all_patients
-from src.models.baseline import get_baseline_feature_names, train_and_evaluate_baseline
+from src.models.lightgbm_baseline import (
+    get_baseline_feature_names as get_baseline_names,
+    train_and_evaluate_baseline as train_baseline,
+)
+from src.models.lightgbm_model import (
+    get_baseline_feature_names as get_improved_names,
+    train_and_evaluate_baseline as train_improved,
+)
 from src.training.train import compute_train_stats, load_config, preprocess_patients, set_seed, setup_logging
 
 
@@ -101,10 +108,17 @@ def main(config_path: str, max_patients: int = None, no_cache: bool = False,
     feature_columns = [c for c in sample_df.columns if c != TARGET]
 
     # Train and evaluate
-    logger.info("Training LightGBM baseline (improved=%s)...", improved)
-    model, threshold, utility, importance = train_and_evaluate_baseline(
-        train_processed, val_processed, feature_columns, improved=improved,
-    )
+    logger.info("Training LightGBM (improved=%s)...", improved)
+    if improved:
+        model, threshold, utility, importance = train_improved(
+            train_processed, val_processed, feature_columns, improved=True,
+        )
+        feature_names = get_improved_names(feature_columns, enhanced=True)
+    else:
+        model, threshold, utility, importance = train_baseline(
+            train_processed, val_processed, feature_columns,
+        )
+        feature_names = get_baseline_names(feature_columns)
 
     logger.info("Utility: %.4f | Threshold: %.2f", utility, threshold)
 
@@ -121,8 +135,6 @@ def main(config_path: str, max_patients: int = None, no_cache: bool = False,
     for _, row in importance.head(20).iterrows():
         logger.info("  %s: %.1f", row["feature"], row["importance"])
 
-    # Save feature names for reference
-    feature_names = get_baseline_feature_names(feature_columns, enhanced=improved)
     n_base = len(feature_columns)
     n_total = len(feature_names)
     logger.info("Features: %d base + %d engineered = %d total", n_base, n_total - n_base, n_total)

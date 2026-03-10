@@ -16,7 +16,7 @@ import torch
 
 from src.data.cache import get_cache_path, load_preprocessed
 from src.data.dataset import SepsisDataset
-from src.models.baseline import LightGBMBaseline, prepare_baseline_data
+from src.models.lightgbm_model import LightGBMBaseline, prepare_baseline_data
 from src.models.ensemble import SepsisEnsemble, filter_by_iculos
 from src.models.gru import GRUWithAttention
 from src.training.train import load_config
