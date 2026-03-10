@@ -1,7 +1,7 @@
 """Explainability analysis script for the GRU sepsis prediction model.
 
 Generates attention visualizations, SHAP feature importance, and
-comparison with LightGBM baseline. All plots saved to outputs/figures/.
+comparison with LightGBM baseline. All plots saved to outputs/figures/{gru,shap}/.
 
 Usage:
     python -m src.explainability.run_analysis --config configs/optimized.yaml
@@ -35,10 +35,9 @@ from src.training.train import load_config
 
 
 FIGURES_DIR = "outputs/figures"
-ATTENTION_DIR = os.path.join(FIGURES_DIR, "attention")
-PATIENTS_DIR = os.path.join(FIGURES_DIR, "patients")
+ATTENTION_DIR = os.path.join(FIGURES_DIR, "gru", "attention")
+PATIENTS_DIR = os.path.join(FIGURES_DIR, "gru", "patients")
 SHAP_DIR = os.path.join(FIGURES_DIR, "shap")
-COMPARISON_DIR = os.path.join(FIGURES_DIR, "comparison")
 
 N_PATIENT_EXAMPLES = 5  # per category (TP, FP, TN, FN)
 SHAP_BACKGROUND = 1000
@@ -71,11 +70,18 @@ def load_model_and_data(config):
     print(f"Validation: {len(val_dataset):,} samples, {len(feature_columns)} features, "
           f"seq_length={seq_length}")
 
-    checkpoint_path = os.path.join(config["output"]["model_dir"], "best.pt")
+    gru_dir = os.path.join(config["output"]["model_dir"], "gru")
+    checkpoint_path = os.path.join(gru_dir, "best.pt")
     if not os.path.exists(checkpoint_path):
-        raise FileNotFoundError(
-            f"No checkpoint at {checkpoint_path}. Train the model first."
-        )
+        # Fall back to renamed checkpoint
+        import glob
+        pt_files = glob.glob(os.path.join(gru_dir, "*.pt"))
+        if pt_files:
+            checkpoint_path = pt_files[0]
+        else:
+            raise FileNotFoundError(
+                f"No checkpoint in {gru_dir}. Train the model first."
+            )
 
     model = GRUWithAttention(
         input_size=config["model"]["input_size"],
@@ -427,6 +433,9 @@ def run_attention_analysis(model, val_loader, val_processed, feature_columns,
         else:
             selected = indices[:n_examples]
 
+        cat_dir = os.path.join(PATIENTS_DIR, cat.lower())
+        os.makedirs(cat_dir, exist_ok=True)
+
         for rank, idx in enumerate(selected, 1):
             pid = attn_data["patient_ids"][idx]
             hour = attn_data["hour_indices"][idx]
@@ -448,8 +457,8 @@ def run_attention_analysis(model, val_loader, val_processed, feature_columns,
                 window = np.vstack([pad, window])
 
             save_path = os.path.join(
-                PATIENTS_DIR,
-                f"patient_attention_{cat.lower()}_{rank}_{pid}.png",
+                cat_dir,
+                f"patient_attention_{rank}_{pid}.png",
             )
             fig = plot_patient_attention(
                 window, attn, feature_columns, save_path=save_path,
@@ -481,7 +490,9 @@ def run_attention_analysis(model, val_loader, val_processed, feature_columns,
                         dtype=np.float32)
         window = np.vstack([pad, window])
 
-    save_path = os.path.join(PATIENTS_DIR, f"patient_attention_highest_pred_{pid}.png")
+    highest_dir = os.path.join(PATIENTS_DIR, "highest_pred")
+    os.makedirs(highest_dir, exist_ok=True)
+    save_path = os.path.join(highest_dir, f"patient_attention_{pid}.png")
     fig = plot_patient_attention(window, attn, feature_columns, save_path=save_path)
     fig.suptitle(
         f"Highest Pred: Patient {pid} | Hour {hour} | "
@@ -573,7 +584,7 @@ def run_baseline_comparison(feature_columns, mean_abs_shap, config):
     print("BASELINE COMPARISON")
     print("=" * 60)
 
-    baseline_path = os.path.join(config["output"]["model_dir"], "baseline.pkl")
+    baseline_path = os.path.join(config["output"]["model_dir"], "lightgbm", "lightgbm_baseline.pkl")
     if not os.path.exists(baseline_path):
         print(f"No baseline model found at {baseline_path}")
         print("Run: python -m src.training.train_baseline --config configs/default.yaml")
@@ -622,7 +633,7 @@ def run_baseline_comparison(feature_columns, mean_abs_shap, config):
 
     fig.suptitle("Feature Importance: GRU+Attention vs LightGBM", fontsize=12)
     fig.tight_layout(rect=[0, 0, 1, 0.95])
-    fig.savefig(os.path.join(COMPARISON_DIR, "feature_importance_comparison.png"),
+    fig.savefig(os.path.join(SHAP_DIR, "feature_importance_comparison.png"),
                 dpi=150, bbox_inches="tight")
     plt.close(fig)
 
@@ -642,18 +653,19 @@ def print_summary(skip_shap=False):
     print("ANALYSIS COMPLETE")
     print("=" * 60)
     print(f"Figures saved to: {FIGURES_DIR}/")
-    print(f"  - attention/attention_distribution.png")
-    print(f"  - attention/mean_attention_by_hour.png")
-    print(f"  - patients/patient_attention_*.png ({N_PATIENT_EXAMPLES * 4 + 1} files)")
+    print(f"  - gru/attention/attention_distribution.png")
+    print(f"  - gru/attention/mean_attention_by_hour.png")
+    print(f"  - gru/patients/{{tp,fp,tn,fn}}/patient_attention_*.png ({N_PATIENT_EXAMPLES * 4} files)")
+    print(f"  - gru/patients/highest_pred/patient_attention_*.png")
     if not skip_shap:
         print(f"  - shap/shap_feature_importance.png")
         print(f"  - shap/shap_temporal_importance.png")
-        print(f"  - comparison/feature_importance_comparison.png")
+        print(f"  - shap/feature_importance_comparison.png")
 
 
 def main(config_path: str, skip_shap: bool = False):
     config = load_config(config_path)
-    for d in [FIGURES_DIR, ATTENTION_DIR, PATIENTS_DIR, SHAP_DIR, COMPARISON_DIR]:
+    for d in [FIGURES_DIR, ATTENTION_DIR, PATIENTS_DIR, SHAP_DIR]:
         os.makedirs(d, exist_ok=True)
 
     model, checkpoint, val_loader, val_processed, train_processed, feature_columns, device = \

@@ -245,7 +245,8 @@ class SepsisTrainer:
         Returns:
             History dict with per-epoch metrics.
         """
-        os.makedirs(self.checkpoint_dir, exist_ok=True)
+        gru_checkpoint_dir = os.path.join(self.checkpoint_dir, "gru")
+        os.makedirs(gru_checkpoint_dir, exist_ok=True)
 
         writer = None
         if SummaryWriter is not None:
@@ -304,7 +305,7 @@ class SepsisTrainer:
                         "utility": utility,
                         "threshold": threshold,
                     },
-                    os.path.join(self.checkpoint_dir, "best.pt"),
+                    os.path.join(gru_checkpoint_dir, "best.pt"),
                 )
             else:
                 patience_counter += 1

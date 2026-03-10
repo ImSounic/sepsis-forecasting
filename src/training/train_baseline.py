@@ -124,9 +124,10 @@ def main(config_path: str, max_patients: int = None, no_cache: bool = False,
 
     # Save model
     model_dir = config["output"]["model_dir"]
-    os.makedirs(model_dir, exist_ok=True)
-    filename = "lightgbm_improved.pkl" if improved else "baseline.pkl"
-    model_path = os.path.join(model_dir, filename)
+    lgb_dir = os.path.join(model_dir, "lightgbm")
+    os.makedirs(lgb_dir, exist_ok=True)
+    filename = "lightgbm_improved.pkl" if improved else "lightgbm_baseline.pkl"
+    model_path = os.path.join(lgb_dir, filename)
     model.save(model_path)
     logger.info("Model saved to %s", model_path)
 
