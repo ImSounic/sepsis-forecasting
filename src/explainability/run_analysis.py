@@ -172,6 +172,169 @@ def print_classification_summary(preds, labels, threshold):
             "f1": f1, "accuracy": accuracy, "auroc": auroc, "auprc": auprc}
 
 
+def print_prediction_timing(attn_data, val_processed, threshold):
+    """Analyze when predictions occur relative to sepsis onset.
+
+    Groups samples by patient to compute patient-level timing statistics
+    for TP, FN, and FP categories.
+    """
+    preds_arr = np.array(attn_data["predictions"])
+    labels_arr = np.array(attn_data["labels"])
+    binary_preds = (preds_arr >= threshold).astype(int)
+    pids = attn_data["patient_ids"]
+    hours = attn_data["hour_indices"]
+
+    # Group all samples by patient
+    patient_samples = {}
+    for i in range(len(pids)):
+        pid = pids[i]
+        if pid not in patient_samples:
+            patient_samples[pid] = []
+        patient_samples[pid].append({
+            "hour": hours[i],
+            "pred": preds_arr[i],
+            "label": int(labels_arr[i]),
+            "binary_pred": int(binary_preds[i]),
+        })
+
+    # Find sepsis onset hour for each patient (first SepsisLabel=1)
+    onset_hours = {}
+    for pid, df in val_processed.items():
+        sepsis_rows = df.index[df["SepsisLabel"] == 1]
+        if len(sepsis_rows) > 0:
+            onset_hours[pid] = int(sepsis_rows[0])
+
+    # Get ICULOS values for each patient (hour index = row index)
+    def get_iculos(pid, hour_idx):
+        if "ICULOS" in val_processed[pid].columns:
+            return int(val_processed[pid]["ICULOS"].iloc[hour_idx])
+        return hour_idx + 1  # fallback: 1-indexed hour
+
+    # TP analysis: sepsis patients correctly flagged
+    # For each TP patient, find first positive prediction and compare to onset
+    tp_patients = {}
+    for pid, samples in patient_samples.items():
+        tp_samples = [s for s in samples if s["binary_pred"] == 1 and s["label"] == 1]
+        if tp_samples:
+            tp_patients[pid] = tp_samples
+
+    tp_lead_times = []
+    for pid, samples in tp_patients.items():
+        if pid not in onset_hours:
+            continue
+        onset = onset_hours[pid]
+        first_tp_hour = min(s["hour"] for s in samples)
+        lead_time = first_tp_hour - onset  # negative = before onset
+        tp_lead_times.append(lead_time)
+
+    # FN analysis: sepsis patients we missed (had label=1 but pred < threshold)
+    # Find patients who have sepsis but NEVER got a positive prediction
+    sepsis_patients = {pid for pid, samples in patient_samples.items()
+                       if any(s["label"] == 1 for s in samples)}
+    tp_patient_ids = set(tp_patients.keys())
+    fn_only_patients = sepsis_patients - tp_patient_ids
+
+    fn_max_preds = []
+    fn_peak_hours = []
+    for pid in fn_only_patients:
+        samples = patient_samples[pid]
+        all_preds = [s["pred"] for s in samples]
+        max_pred = max(all_preds)
+        peak_hour = samples[np.argmax(all_preds)]["hour"]
+        fn_max_preds.append(max_pred)
+        fn_peak_hours.append(peak_hour)
+
+    # FP analysis: non-sepsis patients who got a positive prediction
+    fp_patients = {}
+    for pid, samples in patient_samples.items():
+        if pid in sepsis_patients:
+            continue
+        fp_samples = [s for s in samples if s["binary_pred"] == 1]
+        if fp_samples:
+            fp_patients[pid] = fp_samples
+
+    fp_preds = []
+    fp_iculos = []
+    for pid, samples in fp_patients.items():
+        for s in samples:
+            fp_preds.append(s["pred"])
+            fp_iculos.append(get_iculos(pid, s["hour"]))
+
+    fp_preds = np.array(fp_preds) if fp_preds else np.array([])
+    fp_iculos = np.array(fp_iculos) if fp_iculos else np.array([])
+
+    # Print results
+    print(f"\n  Prediction Timing Analysis:")
+    print(f"  ===========================")
+
+    # TP timing
+    n_tp = len(tp_lead_times)
+    print(f"\n  True Positives (n={n_tp} patients):")
+    if n_tp > 0:
+        lt = np.array(tp_lead_times)
+        very_early = int(((lt >= -12) & (lt < -6)).sum())
+        optimal = int(((lt >= -6) & (lt <= 0)).sum())
+        late = int(((lt > 0) & (lt <= 3)).sum())
+        very_late = int((lt > 3).sum())
+        before_12 = int((lt < -12).sum())
+
+        print(f"    < -12h (very early):       {before_12/n_tp*100:5.1f}% (n={before_12})")
+        print(f"    -12h to -6h (early):       {very_early/n_tp*100:5.1f}% (n={very_early})")
+        print(f"    -6h to 0h (optimal):       {optimal/n_tp*100:5.1f}% (n={optimal})")
+        print(f"    0h to +3h (late):          {late/n_tp*100:5.1f}% (n={late})")
+        print(f"    > +3h (very late):         {very_late/n_tp*100:5.1f}% (n={very_late})")
+        print(f"    Mean time before onset:    {-np.mean(lt):.1f} hours")
+        print(f"    Median time before onset:  {-np.median(lt):.1f} hours")
+    else:
+        print("    No true positive patients")
+
+    # FN analysis
+    n_fn = len(fn_max_preds)
+    print(f"\n  False Negatives (n={n_fn} patients - missed sepsis):")
+    if n_fn > 0:
+        fn_arr = np.array(fn_max_preds)
+        close_miss_35 = int((fn_arr >= threshold - 0.05).sum())
+        close_miss_30 = int((fn_arr >= threshold - 0.10).sum())
+        never_suspected = int((fn_arr < 0.20).sum())
+        low_pred = int((fn_arr < 0.10).sum())
+
+        print(f"    Max pred >= {threshold-.05:.2f}:          "
+              f"{close_miss_35/n_fn*100:5.1f}% (n={close_miss_35}) - close misses")
+        print(f"    Max pred >= {threshold-.10:.2f}:          "
+              f"{close_miss_30/n_fn*100:5.1f}% (n={close_miss_30})")
+        print(f"    Max pred < 0.20:           "
+              f"{never_suspected/n_fn*100:5.1f}% (n={never_suspected}) - model never suspected")
+        print(f"    Max pred < 0.10:           "
+              f"{low_pred/n_fn*100:5.1f}% (n={low_pred}) - completely invisible")
+        print(f"    Mean max prediction:       {fn_arr.mean():.4f}")
+        print(f"    Median max prediction:     {np.median(fn_arr):.4f}")
+    else:
+        print("    No false negative patients (all sepsis detected)")
+
+    # FP analysis
+    n_fp_patients = len(fp_patients)
+    n_fp_samples = len(fp_preds)
+    print(f"\n  False Positives (n={n_fp_patients} patients, {n_fp_samples} samples):")
+    if n_fp_samples > 0:
+        high_conf = int((fp_preds > 0.70).sum())
+        medium_conf = int(((fp_preds >= threshold) & (fp_preds <= 0.70)).sum())
+        early_stay = int((fp_iculos < 24).sum())
+        late_stay = int((fp_iculos > 72).sum())
+
+        print(f"    High confidence (>{0.70:.2f}):  "
+              f"{high_conf/n_fp_samples*100:5.1f}% (n={high_conf})")
+        print(f"    Medium ({threshold:.2f}-0.70):       "
+              f"{medium_conf/n_fp_samples*100:5.1f}% (n={medium_conf})")
+        print(f"    ICULOS < 24h:              "
+              f"{early_stay/n_fp_samples*100:5.1f}% (n={early_stay}) - early in stay")
+        print(f"    ICULOS > 72h:              "
+              f"{late_stay/n_fp_samples*100:5.1f}% (n={late_stay}) - late in stay")
+        print(f"    Mean FP prediction:        {fp_preds.mean():.4f}")
+        print(f"    Mean ICULOS at FP:         {fp_iculos.mean():.1f} hours")
+    else:
+        print("    No false positive samples")
+
+
 def run_attention_analysis(model, val_loader, val_processed, feature_columns,
                            checkpoint, device):
     """Extract attention weights from full validation set and generate plots."""
@@ -201,6 +364,9 @@ def run_attention_analysis(model, val_loader, val_processed, feature_columns,
 
     # Classification summary
     stats = print_classification_summary(preds, labels, threshold)
+
+    # Prediction timing analysis
+    print_prediction_timing(attn_data, val_processed, threshold)
 
     # Attention distribution by TP/FP/TN/FN using the model's threshold
     fig = plot_attention_distribution(
