@@ -205,11 +205,24 @@ def _print_timing_analysis(preds_arr, labels_arr, binary_preds, pids, hours,
     fp_preds = np.array(fp_preds) if fp_preds else np.array([])
     fp_iculos = np.array(fp_iculos) if fp_iculos else np.array([])
 
+    # TN: non-sepsis patients never flagged positive
+    non_sepsis_pids = set(patient_samples.keys()) - sepsis_pids
+    tn_patient_count = len(non_sepsis_pids) - fp_patient_count
+    total_patients = len(patient_samples)
+
     print(f"\n  Prediction Timing Analysis:")
     print(f"  {'=' * 40}")
 
-    # TP timing
+    # Patient-level summary
     n_tp = len(tp_lead_times)
+    n_fn = len(fn_max_preds)
+    print(f"\n  Patient-level summary ({total_patients:,} total):")
+    print(f"    True Positives:   {n_tp:>6,} patients")
+    print(f"    True Negatives:   {tn_patient_count:>6,} patients (never flagged)")
+    print(f"    False Positives:  {fp_patient_count:>6,} patients")
+    print(f"    False Negatives:  {n_fn:>6,} patients (missed sepsis)")
+
+    # TP timing
     print(f"\n  True Positives (n={n_tp} patients):")
     if n_tp > 0:
         lt = np.array(tp_lead_times)
