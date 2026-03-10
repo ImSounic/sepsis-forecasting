@@ -4,10 +4,12 @@ Compares GRU alone, LightGBM alone, weighted ensembles, and ICULOS filtering.
 
 Usage:
     python -m src.training.evaluate_ensemble --config configs/optimized.yaml
+    python -m src.training.evaluate_ensemble --config configs/optimized.yaml --full-analysis
 """
 
 import argparse
 import os
+import pickle
 
 import numpy as np
 import torch
@@ -65,7 +67,241 @@ def find_best_threshold(probs, labels, pids, hours, thresholds=None):
     return best_thresh, best_util
 
 
-def main(config_path):
+def run_full_analysis(name, probs, labels, pids, hours, threshold,
+                      val_processed, gru_probs, lgb_probs, model_dir):
+    """Run detailed analysis on the best ensemble strategy."""
+    from sklearn.metrics import roc_auc_score, average_precision_score
+
+    preds_arr = np.array(probs)
+    labels_arr = np.array(labels)
+    binary_preds = (preds_arr >= threshold).astype(int)
+
+    tp_mask = (binary_preds == 1) & (labels_arr == 1)
+    fp_mask = (binary_preds == 1) & (labels_arr == 0)
+    tn_mask = (binary_preds == 0) & (labels_arr == 0)
+    fn_mask = (binary_preds == 0) & (labels_arr == 1)
+
+    tp = int(tp_mask.sum())
+    fp = int(fp_mask.sum())
+    tn = int(tn_mask.sum())
+    fn = int(fn_mask.sum())
+    total = tp + fp + tn + fn
+
+    precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+    recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+    specificity = tn / (tn + fp) if (tn + fp) > 0 else 0.0
+    f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0.0
+    accuracy = (tp + tn) / total if total > 0 else 0.0
+    auroc = roc_auc_score(labels_arr, preds_arr)
+    auprc = average_precision_score(labels_arr, preds_arr)
+
+    print(f"\n{'=' * 75}")
+    print(f"FULL ANALYSIS: {name} (threshold={threshold:.2f})")
+    print(f"{'=' * 75}")
+
+    # Classification metrics
+    print(f"\n  Classification Metrics:")
+    print(f"    TP: {tp:>8,}    FP: {fp:>8,}")
+    print(f"    FN: {fn:>8,}    TN: {tn:>8,}")
+    print(f"    Total: {total:,}")
+    print(f"\n    Precision:    {precision:.4f}")
+    print(f"    Recall:       {recall:.4f}")
+    print(f"    Specificity:  {specificity:.4f}")
+    print(f"    F1 Score:     {f1:.4f}")
+    print(f"    Accuracy:     {accuracy:.4f}")
+    print(f"    AUROC:        {auroc:.4f}")
+    print(f"    AUPRC:        {auprc:.4f}")
+
+    # Prediction timing analysis
+    _print_timing_analysis(preds_arr, labels_arr, binary_preds, pids, hours,
+                           threshold, val_processed)
+
+    # Model agreement analysis
+    _print_agreement_analysis(gru_probs, lgb_probs, labels_arr, threshold)
+
+    # Save ensemble predictions
+    save_path = os.path.join(model_dir, "ensemble_predictions.pkl")
+    with open(save_path, "wb") as f:
+        pickle.dump({
+            "strategy": name,
+            "threshold": threshold,
+            "probs": preds_arr,
+            "labels": labels_arr,
+            "pids": pids,
+            "hours": hours,
+            "gru_probs": gru_probs,
+            "lgb_probs": lgb_probs,
+        }, f)
+    print(f"\n  Predictions saved to {save_path}")
+
+
+def _print_timing_analysis(preds_arr, labels_arr, binary_preds, pids, hours,
+                           threshold, val_processed):
+    """Analyze prediction timing relative to sepsis onset."""
+    # Group samples by patient
+    patient_samples = {}
+    for i in range(len(pids)):
+        pid = pids[i]
+        if pid not in patient_samples:
+            patient_samples[pid] = []
+        patient_samples[pid].append({
+            "hour": hours[i],
+            "pred": preds_arr[i],
+            "label": int(labels_arr[i]),
+            "binary_pred": int(binary_preds[i]),
+        })
+
+    # Find sepsis onset hour per patient
+    onset_hours = {}
+    for pid, df in val_processed.items():
+        sepsis_rows = df.index[df["SepsisLabel"] == 1]
+        if len(sepsis_rows) > 0:
+            onset_hours[pid] = int(sepsis_rows[0])
+
+    def get_iculos(pid, hour_idx):
+        if "ICULOS" in val_processed[pid].columns:
+            return int(val_processed[pid]["ICULOS"].iloc[hour_idx])
+        return hour_idx + 1
+
+    # TP: patients with at least one correct positive prediction during sepsis
+    tp_patients = {}
+    for pid, samples in patient_samples.items():
+        tp_samps = [s for s in samples if s["binary_pred"] == 1 and s["label"] == 1]
+        if tp_samps:
+            tp_patients[pid] = tp_samps
+
+    tp_lead_times = []
+    for pid in tp_patients:
+        if pid not in onset_hours:
+            continue
+        onset = onset_hours[pid]
+        first_tp = min(s["hour"] for s in tp_patients[pid])
+        tp_lead_times.append(first_tp - onset)
+
+    # FN: sepsis patients never flagged
+    sepsis_pids = {pid for pid, samps in patient_samples.items()
+                   if any(s["label"] == 1 for s in samps)}
+    fn_pids = sepsis_pids - set(tp_patients.keys())
+
+    fn_max_preds = []
+    for pid in fn_pids:
+        all_p = [s["pred"] for s in patient_samples[pid]]
+        fn_max_preds.append(max(all_p))
+
+    # FP: non-sepsis patients with false alarms
+    fp_preds, fp_iculos = [], []
+    fp_patient_count = 0
+    for pid, samples in patient_samples.items():
+        if pid in sepsis_pids:
+            continue
+        fp_samps = [s for s in samples if s["binary_pred"] == 1]
+        if fp_samps:
+            fp_patient_count += 1
+            for s in fp_samps:
+                fp_preds.append(s["pred"])
+                fp_iculos.append(get_iculos(pid, s["hour"]))
+    fp_preds = np.array(fp_preds) if fp_preds else np.array([])
+    fp_iculos = np.array(fp_iculos) if fp_iculos else np.array([])
+
+    print(f"\n  Prediction Timing Analysis:")
+    print(f"  {'=' * 40}")
+
+    # TP timing
+    n_tp = len(tp_lead_times)
+    print(f"\n  True Positives (n={n_tp} patients):")
+    if n_tp > 0:
+        lt = np.array(tp_lead_times)
+        before_12 = int((lt < -12).sum())
+        early = int(((lt >= -12) & (lt < -6)).sum())
+        optimal = int(((lt >= -6) & (lt <= 0)).sum())
+        late = int(((lt > 0) & (lt <= 3)).sum())
+        very_late = int((lt > 3).sum())
+        print(f"    < -12h (very early):       {before_12/n_tp*100:5.1f}% (n={before_12})")
+        print(f"    -12h to -6h (early):       {early/n_tp*100:5.1f}% (n={early})")
+        print(f"    -6h to 0h (optimal):       {optimal/n_tp*100:5.1f}% (n={optimal})")
+        print(f"    0h to +3h (late):          {late/n_tp*100:5.1f}% (n={late})")
+        print(f"    > +3h (very late):         {very_late/n_tp*100:5.1f}% (n={very_late})")
+        print(f"    Mean lead time:            {-np.mean(lt):.1f}h before onset")
+        print(f"    Median lead time:          {-np.median(lt):.1f}h before onset")
+
+    # FN analysis
+    n_fn = len(fn_max_preds)
+    print(f"\n  False Negatives (n={n_fn} patients - missed sepsis):")
+    if n_fn > 0:
+        fn_arr = np.array(fn_max_preds)
+        close_05 = int((fn_arr >= threshold - 0.05).sum())
+        close_10 = int((fn_arr >= threshold - 0.10).sum())
+        never = int((fn_arr < 0.20).sum())
+        print(f"    Max pred >= {threshold-.05:.2f}:          "
+              f"{close_05/n_fn*100:5.1f}% (n={close_05}) - close misses")
+        print(f"    Max pred >= {threshold-.10:.2f}:          "
+              f"{close_10/n_fn*100:5.1f}% (n={close_10})")
+        print(f"    Max pred < 0.20:           "
+              f"{never/n_fn*100:5.1f}% (n={never}) - never suspected")
+        print(f"    Mean max prediction:       {fn_arr.mean():.4f}")
+
+    # FP analysis
+    n_fp = len(fp_preds)
+    print(f"\n  False Positives (n={fp_patient_count} patients, {n_fp} samples):")
+    if n_fp > 0:
+        high = int((fp_preds > 0.70).sum())
+        medium = int(((fp_preds >= threshold) & (fp_preds <= 0.70)).sum())
+        early_stay = int((fp_iculos < 24).sum())
+        late_stay = int((fp_iculos > 72).sum())
+        print(f"    High confidence (>0.70):   {high/n_fp*100:5.1f}% (n={high})")
+        print(f"    Medium ({threshold:.2f}-0.70):       "
+              f"{medium/n_fp*100:5.1f}% (n={medium})")
+        print(f"    ICULOS < 24h:              "
+              f"{early_stay/n_fp*100:5.1f}% (n={early_stay}) - early in stay")
+        print(f"    ICULOS > 72h:              "
+              f"{late_stay/n_fp*100:5.1f}% (n={late_stay}) - late in stay")
+        print(f"    Mean ICULOS at FP:         {fp_iculos.mean():.1f} hours")
+
+
+def _print_agreement_analysis(gru_probs, lgb_probs, labels_arr, threshold):
+    """Analyze agreement between GRU and LightGBM predictions."""
+    gru_pos = gru_probs >= threshold
+    lgb_pos = lgb_probs >= threshold
+
+    both_pos = gru_pos & lgb_pos
+    both_neg = ~gru_pos & ~lgb_pos
+    gru_only = gru_pos & ~lgb_pos
+    lgb_only = ~gru_pos & lgb_pos
+
+    n = len(labels_arr)
+    pos_labels = labels_arr == 1
+
+    print(f"\n  Model Agreement Analysis (threshold={threshold:.2f}):")
+    print(f"  {'=' * 40}")
+    print(f"    {'Category':<25s} {'Count':>8s} {'%':>7s}  {'Sepsis%':>7s}")
+    print(f"    {'-' * 50}")
+
+    for name, mask in [("Both positive", both_pos),
+                       ("Both negative", both_neg),
+                       ("GRU only positive", gru_only),
+                       ("LGB only positive", lgb_only)]:
+        count = int(mask.sum())
+        pct = count / n * 100
+        sepsis_in = int((mask & pos_labels).sum())
+        sepsis_pct = sepsis_in / count * 100 if count > 0 else 0.0
+        print(f"    {name:<25s} {count:>8,} {pct:>6.1f}%  {sepsis_pct:>6.1f}%")
+
+    # Complementary insights
+    both_pos_tp = int((both_pos & pos_labels).sum())
+    gru_only_tp = int((gru_only & pos_labels).sum())
+    lgb_only_tp = int((lgb_only & pos_labels).sum())
+    total_tp = both_pos_tp + gru_only_tp + lgb_only_tp
+
+    print(f"\n    True positives breakdown:")
+    if total_tp > 0:
+        print(f"      Both agree:      {both_pos_tp:>6,} ({both_pos_tp/total_tp*100:.1f}%)")
+        print(f"      GRU-only finds:  {gru_only_tp:>6,} ({gru_only_tp/total_tp*100:.1f}%)")
+        print(f"      LGB-only finds:  {lgb_only_tp:>6,} ({lgb_only_tp/total_tp*100:.1f}%)")
+    else:
+        print(f"      No true positives at this threshold")
+
+
+def main(config_path, full_analysis=False):
     config = load_config(config_path)
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"Device: {device}")
@@ -195,7 +431,6 @@ def main(config_path):
     for name, probs in strategies:
         thresh, util = find_best_threshold(probs, labels, pids, hours)
         results.append((name, util, thresh))
-        # Add notes
         note = ""
         if "ICULOS" in name:
             n_zeroed = int((probs == 0).sum())
@@ -212,13 +447,11 @@ def main(config_path):
     print("DETAILED COMPARISON (top strategies)")
     print("=" * 75)
 
-    # Sort by utility descending
     ranked = sorted(results, key=lambda x: -x[1])
     for rank, (name, util, thresh) in enumerate(ranked[:5], 1):
         print(f"\n  #{rank} {name}")
         print(f"     Utility: {util:.4f}, Threshold: {thresh:.2f}")
 
-        # Compute sample-level stats at optimal threshold
         idx = [i for i, (n, _) in enumerate(strategies) if n == name][0]
         probs_s = strategies[idx][1]
         binary = (probs_s >= thresh).astype(int)
@@ -228,11 +461,24 @@ def main(config_path):
         tn = int(((binary == 0) & (labels == 0)).sum())
         print(f"     TP: {tp:,}  FP: {fp:,}  FN: {fn:,}  TN: {tn:,}")
 
+    # Full analysis on best strategy
+    if full_analysis:
+        best_name, best_util, best_thresh = best
+        best_idx = [i for i, (n, _) in enumerate(strategies) if n == best_name][0]
+        best_probs = strategies[best_idx][1]
+
+        run_full_analysis(
+            best_name, best_probs, labels, pids, hours, best_thresh,
+            val_processed, gru_probs, lgb_probs, model_dir,
+        )
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description="Evaluate ensemble and filtering strategies",
     )
     parser.add_argument("--config", required=True, help="Path to YAML config file")
+    parser.add_argument("--full-analysis", action="store_true",
+                        help="Run detailed analysis on best strategy")
     args = parser.parse_args()
-    main(args.config)
+    main(args.config, full_analysis=args.full_analysis)
