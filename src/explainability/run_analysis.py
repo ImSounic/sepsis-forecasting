@@ -455,36 +455,19 @@ def run_baseline_comparison(feature_columns, mean_abs_shap, config):
     print(f"  LightGBM-only: {sorted(lgb_top_set - gru_top_set)}")
 
 
-def print_clinical_summary():
-    """Print clinical interpretation guide."""
+def print_summary(skip_shap=False):
+    """Print where output files were saved."""
     print("\n" + "=" * 60)
-    print("CLINICAL INTERPRETATION GUIDE")
+    print("ANALYSIS COMPLETE")
     print("=" * 60)
-    print("""
-Expected high-importance features for sepsis:
-  Vital signs:  HR (tachycardia), MAP/SBP (hypotension), Temp, Resp (tachypnea)
-  Lab values:   Lactate, WBC, Creatinine, Bilirubin, Platelets
-  Missingness:  Increased lab ordering signals clinical concern
-  ICULOS:       ICU stay duration correlates with sepsis risk
-
-Key questions:
-  1. Do the model's top features match clinical expectations?
-  2. Does attention concentrate on recent hours? (expected for acute onset)
-  3. Do TP and FP cases show different attention patterns?
-  4. Do GRU and LightGBM agree on important features?
-
-Figures saved to: {figures_dir}/
-  attention/
-    - attention_distribution.png       Attention by TP/FP/TN/FN
-    - mean_attention_by_hour.png       Average attention across samples
-  patients/
-    - patient_attention_*.png          Individual patient overlays (20 total)
-  shap/
-    - shap_feature_importance.png      Top 20 SHAP features
-    - shap_temporal_importance.png     Importance by hour
-  comparison/
-    - feature_importance_comparison.png  GRU vs LightGBM
-""".format(figures_dir=FIGURES_DIR))
+    print(f"Figures saved to: {FIGURES_DIR}/")
+    print(f"  - attention/attention_distribution.png")
+    print(f"  - attention/mean_attention_by_hour.png")
+    print(f"  - patients/patient_attention_*.png ({N_PATIENT_EXAMPLES * 4 + 1} files)")
+    if not skip_shap:
+        print(f"  - shap/shap_feature_importance.png")
+        print(f"  - shap/shap_temporal_importance.png")
+        print(f"  - comparison/feature_importance_comparison.png")
 
 
 def main(config_path: str, skip_shap: bool = False):
@@ -501,7 +484,7 @@ def main(config_path: str, skip_shap: bool = False):
 
     if skip_shap:
         print("\n[Skipping SHAP analysis (--skip-shap)]")
-        print_clinical_summary()
+        print_summary(skip_shap=True)
         return
 
     shap_vals, mean_abs_shap = run_shap_analysis(
@@ -509,7 +492,7 @@ def main(config_path: str, skip_shap: bool = False):
     )
     run_baseline_comparison(feature_columns, mean_abs_shap, config)
 
-    print_clinical_summary()
+    print_summary()
 
 
 if __name__ == "__main__":
