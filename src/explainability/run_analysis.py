@@ -35,6 +35,11 @@ from src.training.train import load_config
 
 
 FIGURES_DIR = "outputs/figures"
+ATTENTION_DIR = os.path.join(FIGURES_DIR, "attention")
+PATIENTS_DIR = os.path.join(FIGURES_DIR, "patients")
+SHAP_DIR = os.path.join(FIGURES_DIR, "shap")
+COMPARISON_DIR = os.path.join(FIGURES_DIR, "comparison")
+
 N_PATIENT_EXAMPLES = 5  # per category (TP, FP, TN, FN)
 SHAP_BACKGROUND = 500
 SHAP_TEST = 200
@@ -185,7 +190,7 @@ def run_attention_analysis(model, val_loader, val_processed, feature_columns,
     # Attention distribution by TP/FP/TN/FN using the model's threshold
     fig = plot_attention_distribution(
         attn_data,
-        save_path=os.path.join(FIGURES_DIR, "attention_distribution.png"),
+        save_path=os.path.join(ATTENTION_DIR, "attention_distribution.png"),
         threshold=threshold,
     )
     plt.close(fig)
@@ -199,7 +204,7 @@ def run_attention_analysis(model, val_loader, val_processed, feature_columns,
     ax.set_title(f"Average Attention by Hour ({len(preds):,} samples)")
     ax.grid(True, axis="y", alpha=0.3)
     fig.tight_layout()
-    fig.savefig(os.path.join(FIGURES_DIR, "mean_attention_by_hour.png"),
+    fig.savefig(os.path.join(ATTENTION_DIR, "mean_attention_by_hour.png"),
                 dpi=150, bbox_inches="tight")
     plt.close(fig)
 
@@ -262,7 +267,7 @@ def run_attention_analysis(model, val_loader, val_processed, feature_columns,
                 window = np.vstack([pad, window])
 
             save_path = os.path.join(
-                FIGURES_DIR,
+                PATIENTS_DIR,
                 f"patient_attention_{cat.lower()}_{rank}_{pid}.png",
             )
             fig = plot_patient_attention(
@@ -295,7 +300,7 @@ def run_attention_analysis(model, val_loader, val_processed, feature_columns,
                         dtype=np.float32)
         window = np.vstack([pad, window])
 
-    save_path = os.path.join(FIGURES_DIR, f"patient_attention_highest_pred_{pid}.png")
+    save_path = os.path.join(PATIENTS_DIR, f"patient_attention_highest_pred_{pid}.png")
     fig = plot_patient_attention(window, attn, feature_columns, save_path=save_path)
     fig.suptitle(
         f"Highest Pred: Patient {pid} | Hour {hour} | "
@@ -358,13 +363,13 @@ def run_shap_analysis(model, val_loader, train_processed, feature_columns, devic
 
     fig = plot_feature_importance_shap(
         shap_vals, feature_columns, top_k=20,
-        save_path=os.path.join(FIGURES_DIR, "shap_feature_importance.png"),
+        save_path=os.path.join(SHAP_DIR, "shap_feature_importance.png"),
     )
     plt.close(fig)
 
     fig = plot_temporal_importance(
         shap_vals, feature_columns,
-        save_path=os.path.join(FIGURES_DIR, "shap_temporal_importance.png"),
+        save_path=os.path.join(SHAP_DIR, "shap_temporal_importance.png"),
     )
     plt.close(fig)
 
@@ -436,7 +441,7 @@ def run_baseline_comparison(feature_columns, mean_abs_shap, config):
 
     fig.suptitle("Feature Importance: GRU+Attention vs LightGBM", fontsize=12)
     fig.tight_layout(rect=[0, 0, 1, 0.95])
-    fig.savefig(os.path.join(FIGURES_DIR, "feature_importance_comparison.png"),
+    fig.savefig(os.path.join(COMPARISON_DIR, "feature_importance_comparison.png"),
                 dpi=150, bbox_inches="tight")
     plt.close(fig)
 
@@ -469,18 +474,23 @@ Key questions:
   4. Do GRU and LightGBM agree on important features?
 
 Figures saved to: {figures_dir}/
-  - attention_distribution.png       Attention by TP/FP/TN/FN
-  - mean_attention_by_hour.png       Average attention across samples
-  - patient_attention_*.png          Individual patient overlays (20 total)
-  - shap_feature_importance.png      Top 20 SHAP features
-  - shap_temporal_importance.png     Importance by hour
-  - feature_importance_comparison.png  GRU vs LightGBM
+  attention/
+    - attention_distribution.png       Attention by TP/FP/TN/FN
+    - mean_attention_by_hour.png       Average attention across samples
+  patients/
+    - patient_attention_*.png          Individual patient overlays (20 total)
+  shap/
+    - shap_feature_importance.png      Top 20 SHAP features
+    - shap_temporal_importance.png     Importance by hour
+  comparison/
+    - feature_importance_comparison.png  GRU vs LightGBM
 """.format(figures_dir=FIGURES_DIR))
 
 
 def main(config_path: str, skip_shap: bool = False):
     config = load_config(config_path)
-    os.makedirs(FIGURES_DIR, exist_ok=True)
+    for d in [FIGURES_DIR, ATTENTION_DIR, PATIENTS_DIR, SHAP_DIR, COMPARISON_DIR]:
+        os.makedirs(d, exist_ok=True)
 
     model, checkpoint, val_loader, val_processed, train_processed, feature_columns, device = \
         load_model_and_data(config)
