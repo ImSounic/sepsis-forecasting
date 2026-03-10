@@ -2,6 +2,7 @@
 
 Usage:
     python -m src.training.train_baseline --config configs/default.yaml
+    python -m src.training.train_baseline --config configs/default.yaml --improved
     python -m src.training.train_baseline --config configs/default.yaml --max_patients 50
 """
 
@@ -22,11 +23,15 @@ from src.models.baseline import get_baseline_feature_names, train_and_evaluate_b
 from src.training.train import compute_train_stats, load_config, preprocess_patients, set_seed, setup_logging
 
 
-def main(config_path: str, max_patients: int = None, no_cache: bool = False):
+def main(config_path: str, max_patients: int = None, no_cache: bool = False,
+         improved: bool = False):
     config = load_config(config_path)
     logger = setup_logging(config["output"]["log_dir"])
     seed = config.get("seed", 42)
     set_seed(seed)
+
+    mode = "improved" if improved else "default"
+    logger.info("LightGBM mode: %s", mode)
 
     if max_patients is not None:
         config["data"]["max_patients"] = max_patients
@@ -96,9 +101,9 @@ def main(config_path: str, max_patients: int = None, no_cache: bool = False):
     feature_columns = [c for c in sample_df.columns if c != TARGET]
 
     # Train and evaluate
-    logger.info("Training LightGBM baseline...")
+    logger.info("Training LightGBM baseline (improved=%s)...", improved)
     model, threshold, utility, importance = train_and_evaluate_baseline(
-        train_processed, val_processed, feature_columns,
+        train_processed, val_processed, feature_columns, improved=improved,
     )
 
     logger.info("Utility: %.4f | Threshold: %.2f", utility, threshold)
@@ -106,7 +111,8 @@ def main(config_path: str, max_patients: int = None, no_cache: bool = False):
     # Save model
     model_dir = config["output"]["model_dir"]
     os.makedirs(model_dir, exist_ok=True)
-    model_path = os.path.join(model_dir, "baseline.pkl")
+    filename = "lightgbm_improved.pkl" if improved else "baseline.pkl"
+    model_path = os.path.join(model_dir, filename)
     model.save(model_path)
     logger.info("Model saved to %s", model_path)
 
@@ -116,10 +122,10 @@ def main(config_path: str, max_patients: int = None, no_cache: bool = False):
         logger.info("  %s: %.1f", row["feature"], row["importance"])
 
     # Save feature names for reference
-    feature_names = get_baseline_feature_names(feature_columns)
+    feature_names = get_baseline_feature_names(feature_columns, enhanced=improved)
     n_base = len(feature_columns)
     n_total = len(feature_names)
-    logger.info("Features: %d base + %d rolling/trend = %d total", n_base, n_total - n_base, n_total)
+    logger.info("Features: %d base + %d engineered = %d total", n_base, n_total - n_base, n_total)
 
 
 if __name__ == "__main__":
@@ -133,5 +139,10 @@ if __name__ == "__main__":
         "--no-cache", action="store_true",
         help="Force reprocessing even if a valid cache exists",
     )
+    parser.add_argument(
+        "--improved", action="store_true",
+        help="Use improved hyperparameters and enhanced features",
+    )
     args = parser.parse_args()
-    main(args.config, max_patients=args.max_patients, no_cache=args.no_cache)
+    main(args.config, max_patients=args.max_patients, no_cache=args.no_cache,
+         improved=args.improved)
