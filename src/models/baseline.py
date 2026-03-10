@@ -116,13 +116,10 @@ def create_baseline_features(patient_df, feature_columns, enhanced=False):
 
         interactions = []
 
-        # Shock Index: HR / SBP (high values indicate shock)
+        # Shock Index: HR * SBP product (avoids division on z-scored data)
         if hr_idx is not None and sbp_idx is not None:
-            shock_idx = np.zeros((n_hours, 1), dtype=np.float32)
-            for t in range(n_hours):
-                sbp = base[t, sbp_idx]
-                shock_idx[t, 0] = base[t, hr_idx] / sbp if abs(sbp) > 1e-6 else 0.0
-            interactions.append(shock_idx)
+            shock_feat = base[:, hr_idx:hr_idx + 1] * base[:, sbp_idx:sbp_idx + 1]
+            interactions.append(shock_feat)
 
         # MAP trend: MAP_current - MAP_6h_ago
         if map_idx is not None:
@@ -132,15 +129,12 @@ def create_baseline_features(patient_df, feature_columns, enhanced=False):
                 map_trend[t, 0] = base[t, map_idx] - base[t_prev, map_idx]
             interactions.append(map_trend)
 
-        # Resp/HR ratio
+        # Resp * HR product (avoids division on z-scored data)
         if resp_idx is not None and hr_idx is not None:
-            resp_hr = np.zeros((n_hours, 1), dtype=np.float32)
-            for t in range(n_hours):
-                hr = base[t, hr_idx]
-                resp_hr[t, 0] = base[t, resp_idx] / hr if abs(hr) > 1e-6 else 0.0
+            resp_hr = base[:, resp_idx:resp_idx + 1] * base[:, hr_idx:hr_idx + 1]
             interactions.append(resp_hr)
 
-        # Temperature deviation from 37°C (on normalized scale, this is deviation from mean)
+        # Temperature deviation (absolute value of z-scored temp)
         if temp_idx is not None:
             temp_dev = np.abs(base[:, temp_idx:temp_idx + 1])
             interactions.append(temp_dev)
@@ -170,11 +164,11 @@ def get_baseline_feature_names(feature_columns, enhanced=False):
 
         # Clinical interactions (only if vitals exist in feature_columns)
         if "HR" in vital_cols and "SBP" in vital_cols:
-            names.append("shock_index")
+            names.append("HR_SBP_product")
         if "MAP" in vital_cols:
             names.append("MAP_trend_6h")
         if "Resp" in vital_cols and "HR" in vital_cols:
-            names.append("resp_hr_ratio")
+            names.append("Resp_HR_product")
         if "Temp" in vital_cols:
             names.append("temp_deviation")
 
@@ -203,12 +197,23 @@ def prepare_baseline_data(patients_dict, feature_columns, enhanced=False):
         all_pids.extend([pid] * len(df))
         all_hours.extend(range(len(df)))
 
-    return (
-        np.vstack(all_X),
-        np.concatenate(all_y),
-        all_pids,
-        all_hours,
-    )
+    X = np.vstack(all_X)
+    y = np.concatenate(all_y)
+
+    # Validate and clean features
+    n_nan = int(np.isnan(X).sum())
+    n_inf = int(np.isinf(X).sum())
+    if n_nan > 0 or n_inf > 0:
+        print(f"  WARNING: {n_nan:,} NaN and {n_inf:,} Inf values found, replacing...")
+        np.nan_to_num(X, copy=False, nan=0.0, posinf=1e6, neginf=-1e6)
+
+    # Clip extreme values to prevent LightGBM issues
+    np.clip(X, -1e6, 1e6, out=X)
+
+    print(f"  Feature stats: min={X.min():.2f}, max={X.max():.2f}, "
+          f"mean={X.mean():.4f}, std={X.std():.4f}")
+
+    return (X, y, all_pids, all_hours)
 
 
 class LightGBMBaseline:
@@ -234,13 +239,13 @@ class LightGBMBaseline:
         "metric": "binary_logloss",
         "boosting_type": "gbdt",
         "num_leaves": 127,
-        "learning_rate": 0.03,
+        "learning_rate": 0.05,
         "feature_fraction": 0.8,
         "bagging_fraction": 0.8,
         "bagging_freq": 5,
         "min_child_samples": 50,
-        "reg_alpha": 0.1,
-        "reg_lambda": 0.1,
+        "reg_alpha": 0.01,
+        "reg_lambda": 0.01,
         "is_unbalance": True,
         "verbose": -1,
         "n_jobs": -1,
@@ -257,11 +262,12 @@ class LightGBMBaseline:
 
     def fit(self, X_train, y_train, X_val=None, y_val=None, num_boost_round=None,
             early_stopping_rounds=None, feature_names=None):
+        """Train the model with optional early stopping on validation set."""
         if num_boost_round is None:
             num_boost_round = 3000 if self.enhanced else 1000
         if early_stopping_rounds is None:
             early_stopping_rounds = 100 if self.enhanced else 50
-        """Train the model with optional early stopping on validation set."""
+
         self.feature_names = feature_names
         dtrain = lgb.Dataset(X_train, label=y_train, feature_name=feature_names)
 
@@ -274,6 +280,10 @@ class LightGBMBaseline:
             valid_sets.append(dval)
             valid_names.append("val")
             callbacks.append(lgb.early_stopping(early_stopping_rounds))
+
+        print(f"  LightGBM params: leaves={self.params['num_leaves']}, "
+              f"lr={self.params['learning_rate']}, rounds={num_boost_round}, "
+              f"early_stop={early_stopping_rounds}")
 
         self.model = lgb.train(
             self.params,
