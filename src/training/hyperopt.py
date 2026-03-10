@@ -243,9 +243,7 @@ def main(config_path: str, n_trials: int = 50):
     print(f"\nStudy saved to {study_path}")
 
     # Print results
-    print(f"\n{'=' * 60}")
-    print("OPTIMIZATION RESULTS")
-    print(f"{'=' * 60}")
+    print("\nOPTIMIZATION RESULTS\n")
     print(f"  Completed trials: {len(study.trials)}")
     pruned = len([t for t in study.trials if t.state == optuna.trial.TrialState.PRUNED])
     print(f"  Pruned trials:    {pruned}")

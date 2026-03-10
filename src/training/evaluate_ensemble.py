@@ -95,9 +95,7 @@ def run_full_analysis(name, probs, labels, pids, hours, threshold,
     auroc = roc_auc_score(labels_arr, preds_arr)
     auprc = average_precision_score(labels_arr, preds_arr)
 
-    print(f"\n{'=' * 75}")
-    print(f"FULL ANALYSIS: {name} (threshold={threshold:.2f})")
-    print(f"{'=' * 75}")
+    print(f"\nFULL ANALYSIS: {name} (threshold={threshold:.2f})\n")
 
     # Classification metrics
     print(f"\n  Classification Metrics:")
@@ -211,7 +209,6 @@ def _print_timing_analysis(preds_arr, labels_arr, binary_preds, pids, hours,
     total_patients = len(patient_samples)
 
     print(f"\n  Prediction Timing Analysis:")
-    print(f"  {'=' * 40}")
 
     # Patient-level summary
     n_tp = len(tp_lead_times)
@@ -287,9 +284,7 @@ def _print_agreement_analysis(gru_probs, lgb_probs, labels_arr, threshold):
     pos_labels = labels_arr == 1
 
     print(f"\n  Model Agreement Analysis (threshold={threshold:.2f}):")
-    print(f"  {'=' * 40}")
     print(f"    {'Category':<25s} {'Count':>8s} {'%':>7s}  {'Sepsis%':>7s}")
-    print(f"    {'-' * 50}")
 
     for name, mask in [("Both positive", both_pos),
                        ("Both negative", both_neg),
@@ -446,11 +441,8 @@ def main(config_path, full_analysis=False):
         strategies.append((f"Ens ({gw:.1f}/{1-gw:.1f}) + ICULOS>=6", filtered))
 
     # Evaluate all strategies
-    print("\n" + "=" * 75)
-    print("ENSEMBLE & FILTERING EVALUATION")
-    print("=" * 75)
+    print("\nENSEMBLE & FILTERING EVALUATION\n")
     print(f"{'Model':<30s} {'Utility':>8s} {'Threshold':>10s} {'Notes'}")
-    print("-" * 75)
 
     results = []
     for name, probs in strategies:
@@ -464,13 +456,9 @@ def main(config_path, full_analysis=False):
 
     # Find best strategy
     best = max(results, key=lambda x: x[1])
-    print("-" * 75)
-    print(f"{'BEST: ' + best[0]:<30s} {best[1]:>8.4f} {best[2]:>10.2f}")
+    print(f"\n{'BEST: ' + best[0]:<30s} {best[1]:>8.4f} {best[2]:>10.2f}")
 
-    # Detailed comparison of top strategies
-    print("\n" + "=" * 75)
-    print("DETAILED COMPARISON (top strategies)")
-    print("=" * 75)
+    print("\nDETAILED COMPARISON (top strategies)\n")
 
     ranked = sorted(results, key=lambda x: -x[1])
     for rank, (name, util, thresh) in enumerate(ranked[:5], 1):
