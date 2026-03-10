@@ -265,11 +265,11 @@ class LightGBMBaseline:
         """Train the model with optional early stopping on validation set.
 
         For improved/enhanced mode, early stopping is disabled and a fixed
-        number of trees (500) are trained. Validation loss is monitored
+        number of trees (1000) are trained. Validation loss is monitored
         for logging only.
         """
         if num_boost_round is None:
-            num_boost_round = 500 if self.enhanced else 1000
+            num_boost_round = 1000 if self.enhanced else 1000
         if early_stopping_rounds is None:
             early_stopping_rounds = None if self.enhanced else 50
 
