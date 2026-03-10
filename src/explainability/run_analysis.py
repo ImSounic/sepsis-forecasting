@@ -109,9 +109,7 @@ def print_model_summary(model, config, checkpoint, feature_columns, val_dataset_
     total_params, trainable_params = count_parameters(model)
     seq_length = config["data"]["seq_length"]
 
-    print("\n" + "=" * 60)
-    print("MODEL SUMMARY")
-    print("=" * 60)
+    print("\nMODEL SUMMARY\n")
     print(f"  Type:             GRU + Temporal Attention")
     print(f"  Input size:       {config['model']['input_size']}")
     print(f"  Hidden size:      {config['model']['hidden_size']}")
@@ -271,7 +269,6 @@ def print_prediction_timing(attn_data, val_processed, threshold):
 
     # Print results
     print(f"\n  Prediction Timing Analysis:")
-    print(f"  ===========================")
 
     # TP timing
     n_tp = len(tp_lead_times)
@@ -347,9 +344,7 @@ def run_attention_analysis(model, val_loader, val_processed, feature_columns,
     seq_length = len(next(iter(val_loader))[0][0])
     threshold = checkpoint["threshold"]
 
-    print("\n" + "=" * 60)
-    print("ATTENTION ANALYSIS (full validation set)")
-    print("=" * 60)
+    print("\nATTENTION ANALYSIS (full validation set)\n")
 
     print("Running inference on all validation samples...")
     attn_data = extract_attention_weights(
@@ -520,9 +515,7 @@ def run_shap_analysis(model, val_loader, train_processed, feature_columns, devic
 
     seq_length = len(next(iter(val_loader))[0][0])
 
-    print("\n" + "=" * 60)
-    print("SHAP ANALYSIS")
-    print("=" * 60)
+    print("\nSHAP ANALYSIS\n")
 
     print(f"Collecting {SHAP_BACKGROUND} background samples from training data...")
     train_dataset = SepsisDataset(train_processed, seq_length=seq_length)
@@ -580,9 +573,7 @@ def run_baseline_comparison(feature_columns, mean_abs_shap, config):
     """Compare GRU SHAP importance with LightGBM feature importance."""
     from src.models.lightgbm_model import LightGBMBaseline
 
-    print("\n" + "=" * 60)
-    print("BASELINE COMPARISON")
-    print("=" * 60)
+    print("\nBASELINE COMPARISON\n")
 
     baseline_path = os.path.join(config["output"]["model_dir"], "lightgbm", "lightgbm_baseline.pkl")
     if not os.path.exists(baseline_path):
@@ -649,9 +640,7 @@ def run_baseline_comparison(feature_columns, mean_abs_shap, config):
 
 def print_summary(skip_shap=False):
     """Print where output files were saved."""
-    print("\n" + "=" * 60)
-    print("ANALYSIS COMPLETE")
-    print("=" * 60)
+    print("\nANALYSIS COMPLETE\n")
     print(f"Figures saved to: {FIGURES_DIR}/")
     print(f"  - gru/attention/attention_distribution.png")
     print(f"  - gru/attention/mean_attention_by_hour.png")
