@@ -13,6 +13,32 @@ except (ImportError, TypeError, AttributeError):
     SummaryWriter = None
 
 
+def compute_f1_score(labels, predictions):
+    """Compute sample-level F1 score from binary labels and predictions."""
+    tp = sum(1 for l, p in zip(labels, predictions) if l == 1 and p == 1)
+    fp = sum(1 for l, p in zip(labels, predictions) if l == 0 and p == 1)
+    fn = sum(1 for l, p in zip(labels, predictions) if l == 1 and p == 0)
+    precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+    recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+    if precision + recall == 0:
+        return 0.0
+    return 2 * precision * recall / (precision + recall)
+
+
+def compute_youden_j(labels, predictions):
+    """Compute Youden's J index = sensitivity + specificity - 1.
+
+    Ranges from -1 to 1. Higher is better; 0 means no discriminative ability.
+    """
+    tp = sum(1 for l, p in zip(labels, predictions) if l == 1 and p == 1)
+    fp = sum(1 for l, p in zip(labels, predictions) if l == 0 and p == 1)
+    tn = sum(1 for l, p in zip(labels, predictions) if l == 0 and p == 0)
+    fn = sum(1 for l, p in zip(labels, predictions) if l == 1 and p == 0)
+    sensitivity = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+    specificity = tn / (tn + fp) if (tn + fp) > 0 else 0.0
+    return sensitivity + specificity - 1.0
+
+
 def compute_utility_score(labels, predictions, patient_ids, hour_indices):
     """Compute PhysioNet 2019 utility score.
 
@@ -239,13 +265,54 @@ class SepsisTrainer:
 
         return best_threshold, best_score
 
-    def train(self, epochs):
+    def find_optimal_thresholds(self, predictions, labels, patient_ids, hour_indices):
+        """Find optimal thresholds for utility, F1, and Youden's J.
+
+        Uses 0.01 step for finer granularity (F1/Youden are more threshold-sensitive).
+
+        Returns:
+            dict with keys 'utility', 'f1', 'youden', each mapping to
+            {'threshold': float, 'score': float}.
+        """
+        thresholds = np.arange(0.05, 0.91, 0.01)
+
+        best = {
+            "utility": {"threshold": 0.5, "score": float("-inf")},
+            "f1": {"threshold": 0.5, "score": float("-inf")},
+            "youden": {"threshold": 0.5, "score": float("-inf")},
+        }
+
+        for t in thresholds:
+            binary_preds = [1 if p >= t else 0 for p in predictions]
+
+            util = compute_utility_score(labels, binary_preds, patient_ids, hour_indices)
+            if util > best["utility"]["score"]:
+                best["utility"] = {"threshold": float(t), "score": util}
+
+            f1 = compute_f1_score(labels, binary_preds)
+            if f1 > best["f1"]["score"]:
+                best["f1"] = {"threshold": float(t), "score": f1}
+
+            youden = compute_youden_j(labels, binary_preds)
+            if youden > best["youden"]["score"]:
+                best["youden"] = {"threshold": float(t), "score": youden}
+
+        return best
+
+    def train(self, epochs, early_stop_metric="utility", checkpoint_subdir="gru"):
         """Full training loop with early stopping and checkpointing.
+
+        Args:
+            epochs: Max number of training epochs.
+            early_stop_metric: Metric for early stopping/checkpointing.
+                One of 'utility', 'f1', 'youden'. Default 'utility'.
+            checkpoint_subdir: Subdirectory under checkpoint_dir for saving
+                the best model. Default 'gru'.
 
         Returns:
             History dict with per-epoch metrics.
         """
-        gru_checkpoint_dir = os.path.join(self.checkpoint_dir, "gru")
+        gru_checkpoint_dir = os.path.join(self.checkpoint_dir, checkpoint_subdir)
         os.makedirs(gru_checkpoint_dir, exist_ok=True)
 
         writer = None
@@ -257,45 +324,62 @@ class SepsisTrainer:
             "train_loss": [],
             "val_loss": [],
             "val_utility": [],
+            "val_f1": [],
+            "val_youden": [],
             "threshold": [],
             "lr": [],
         }
 
-        best_utility = float("-inf")
+        best_score = float("-inf")
         patience_counter = 0
 
         for epoch in range(1, epochs + 1):
             train_loss = self.train_epoch()
 
             val_loss, preds, labels, pids, hours = self.validate()
-            threshold, utility = self.find_optimal_threshold(preds, labels, pids, hours)
+            all_thresholds = self.find_optimal_thresholds(preds, labels, pids, hours)
 
-            self.scheduler.step(utility)
+            # Extract scores for each metric
+            utility = all_thresholds["utility"]["score"]
+            f1 = all_thresholds["f1"]["score"]
+            youden = all_thresholds["youden"]["score"]
+
+            # Use selected metric for early stopping and scheduler
+            current_score = all_thresholds[early_stop_metric]["score"]
+            current_threshold = all_thresholds[early_stop_metric]["threshold"]
+
+            self.scheduler.step(current_score)
             current_lr = self.optimizer.param_groups[0]["lr"]
 
             # Record history
             history["train_loss"].append(train_loss)
             history["val_loss"].append(val_loss)
             history["val_utility"].append(utility)
-            history["threshold"].append(threshold)
+            history["val_f1"].append(f1)
+            history["val_youden"].append(youden)
+            history["threshold"].append(current_threshold)
             history["lr"].append(current_lr)
 
             if writer:
                 writer.add_scalar("Loss/train", train_loss, epoch)
                 writer.add_scalar("Loss/val", val_loss, epoch)
                 writer.add_scalar("Metrics/utility", utility, epoch)
-                writer.add_scalar("Metrics/threshold", threshold, epoch)
+                writer.add_scalar("Metrics/f1", f1, epoch)
+                writer.add_scalar("Metrics/youden", youden, epoch)
+                writer.add_scalar("Metrics/threshold", current_threshold, epoch)
                 writer.add_scalar("LR", current_lr, epoch)
 
+            metric_label = early_stop_metric.upper()
             print(
                 f"Epoch {epoch}/{epochs} | "
                 f"Train: {train_loss:.4f} | Val: {val_loss:.4f} | "
-                f"Utility: {utility:.4f} | Thr: {threshold:.2f} | LR: {current_lr:.1e}"
+                f"Util: {utility:.4f} | F1: {f1:.4f} | Youden: {youden:.4f} | "
+                f"Thr({metric_label}): {current_threshold:.2f} | LR: {current_lr:.1e}"
             )
 
-            # Early stopping + checkpointing
-            if utility > best_utility:
-                best_utility = utility
+            # Early stopping + checkpointing based on selected metric
+            if current_score > best_score:
+                best_score = current_score
                 patience_counter = 0
                 torch.save(
                     {
@@ -303,7 +387,11 @@ class SepsisTrainer:
                         "model_state_dict": self.model.state_dict(),
                         "optimizer_state_dict": self.optimizer.state_dict(),
                         "utility": utility,
-                        "threshold": threshold,
+                        "f1": f1,
+                        "youden": youden,
+                        "threshold": current_threshold,
+                        "early_stop_metric": early_stop_metric,
+                        "all_thresholds": all_thresholds,
                     },
                     os.path.join(gru_checkpoint_dir, "best.pt"),
                 )

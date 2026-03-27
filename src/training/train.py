@@ -153,7 +153,9 @@ def preprocess_patients(
     return processed
 
 
-def main(config_path: str, max_patients: int = None, no_cache: bool = False):
+def main(config_path: str, max_patients: int = None, no_cache: bool = False,
+         pos_weight_multiplier: float = None, early_stop_metric: str = None,
+         checkpoint_name: str = None):
     config = load_config(config_path)
     logger = setup_logging(config["output"]["log_dir"])
     seed = config.get("seed", 42)
@@ -269,21 +271,38 @@ def main(config_path: str, max_patients: int = None, no_cache: bool = False):
         "log_dir": config["output"]["log_dir"],
     }
     trainer = SepsisTrainer(model, train_loader, val_loader, trainer_config)
-    logger.info("Positive class weight: %.2f", trainer.pos_weight)
+
+    # Apply pos_weight_multiplier (scales the auto-computed class weight)
+    multiplier = pos_weight_multiplier or config["training"].get("pos_weight_multiplier", 1.0)
+    if multiplier != 1.0:
+        trainer.pos_weight = trainer.pos_weight * multiplier
+    logger.info("Positive class weight: %.2f (multiplier=%.2f)", trainer.pos_weight, multiplier)
 
     # Train
-    logger.info("Starting training for %d epochs...", config["training"]["epochs"])
-    history = trainer.train(config["training"]["epochs"])
+    early_metric = early_stop_metric or "utility"
+    checkpoint_sub = checkpoint_name or "gru"
+    logger.info(
+        "Starting training for %d epochs (early_stop=%s, checkpoint=%s)...",
+        config["training"]["epochs"], early_metric, checkpoint_sub,
+    )
+    history = trainer.train(
+        config["training"]["epochs"],
+        early_stop_metric=early_metric,
+        checkpoint_subdir=checkpoint_sub,
+    )
 
     # Final report
     if history["val_utility"]:
-        best_idx = int(np.argmax(history["val_utility"]))
+        # Find best epoch based on the selected metric
+        metric_key = f"val_{early_metric}" if early_metric != "utility" else "val_utility"
+        best_idx = int(np.argmax(history[metric_key]))
         logger.info(
-            "Done. Best epoch %d: utility=%.4f, threshold=%.2f, val_loss=%.4f",
+            "Done. Best epoch %d: utility=%.4f, f1=%.4f, youden=%.4f, threshold=%.2f",
             best_idx + 1,
             history["val_utility"][best_idx],
+            history["val_f1"][best_idx],
+            history["val_youden"][best_idx],
             history["threshold"][best_idx],
-            history["val_loss"][best_idx],
         )
 
 
@@ -298,5 +317,24 @@ if __name__ == "__main__":
         "--no-cache", action="store_true",
         help="Force reprocessing even if a valid cache exists",
     )
+    parser.add_argument(
+        "--pos-weight-multiplier", type=float, default=None,
+        help="Override pos_weight_multiplier from config (e.g., 0.5, 1.0, 2.0)",
+    )
+    parser.add_argument(
+        "--early-stop-metric", choices=["utility", "f1", "youden"], default=None,
+        help="Metric for early stopping and checkpointing (default: utility)",
+    )
+    parser.add_argument(
+        "--checkpoint-name", default=None,
+        help="Subdirectory name under model_dir for checkpoints (default: gru)",
+    )
     args = parser.parse_args()
-    main(args.config, max_patients=args.max_patients, no_cache=args.no_cache)
+    main(
+        args.config,
+        max_patients=args.max_patients,
+        no_cache=args.no_cache,
+        pos_weight_multiplier=args.pos_weight_multiplier,
+        early_stop_metric=args.early_stop_metric,
+        checkpoint_name=args.checkpoint_name,
+    )
