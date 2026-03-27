@@ -11,7 +11,7 @@ import lightgbm as lgb
 import numpy as np
 import pandas as pd
 
-from src.data.preprocessing import VITAL_SIGNS
+from src.data.preprocessing import VITAL_SIGNS, LAB_VALUES
 from src.training.trainer import compute_utility_score
 
 
@@ -35,7 +35,226 @@ def _compute_rolling(base, vital_indices, n_hours, window):
     return r_mean, r_min, r_max, r_std
 
 
-def create_baseline_features(patient_df, feature_columns, enhanced=False):
+def _unnormalize(z_values, col_name, norm_stats):
+    """Convert z-scored values back to raw scale using normalization stats."""
+    if norm_stats is None or col_name not in norm_stats:
+        return z_values
+    s = norm_stats[col_name]
+    return z_values * s["std"] + s["mean"]
+
+
+def _sofa_score_components(raw_values, feature_columns, norm_stats):
+    """Compute SOFA-based clinical scores from raw (un-normalized) values.
+
+    Returns array of shape (n_hours, 7): MAP, Creatinine, Bilirubin, Platelets,
+    Resp/FiO2, coagulation, and total partial SOFA.
+    """
+    n_hours = raw_values.shape[0]
+    scores = np.zeros((n_hours, 7), dtype=np.float32)
+
+    def _get_raw(col):
+        if col not in feature_columns:
+            return None
+        idx = feature_columns.index(col)
+        return _unnormalize(raw_values[:, idx], col, norm_stats)
+
+    # MAP component (0-4): <70=1, dopamine<=5=2, dopa>5=3, dopa>15=4
+    map_raw = _get_raw("MAP")
+    if map_raw is not None:
+        scores[:, 0] = np.where(map_raw < 70, 1, 0)
+
+    # Creatinine component (0-4): 1.2-1.9=1, 2.0-3.4=2, 3.5-4.9=3, >5=4
+    creat_raw = _get_raw("Creatinine")
+    if creat_raw is not None:
+        scores[:, 1] = np.where(creat_raw >= 5.0, 4,
+                       np.where(creat_raw >= 3.5, 3,
+                       np.where(creat_raw >= 2.0, 2,
+                       np.where(creat_raw >= 1.2, 1, 0))))
+
+    # Bilirubin component (0-4): 1.2-1.9=1, 2.0-5.9=2, 6.0-11.9=3, >12=4
+    bili_raw = _get_raw("Bilirubin_total")
+    if bili_raw is not None:
+        scores[:, 2] = np.where(bili_raw >= 12.0, 4,
+                       np.where(bili_raw >= 6.0, 3,
+                       np.where(bili_raw >= 2.0, 2,
+                       np.where(bili_raw >= 1.2, 1, 0))))
+
+    # Platelets component (0-4): <150=1, <100=2, <50=3, <20=4
+    plt_raw = _get_raw("Platelets")
+    if plt_raw is not None:
+        scores[:, 3] = np.where(plt_raw < 20, 4,
+                       np.where(plt_raw < 50, 3,
+                       np.where(plt_raw < 100, 2,
+                       np.where(plt_raw < 150, 1, 0))))
+
+    # Respiration: PaO2/FiO2 ratio if available
+    pao2_raw = _get_raw("PaCO2")  # Note: dataset has PaCO2, not PaO2
+    fio2_raw = _get_raw("FiO2")
+    if fio2_raw is not None:
+        # Use SaO2/FiO2 as proxy
+        sao2_raw = _get_raw("SaO2")
+        if sao2_raw is not None:
+            with np.errstate(divide="ignore", invalid="ignore"):
+                ratio = np.where(fio2_raw > 0, sao2_raw / fio2_raw, 0)
+            scores[:, 4] = np.where(ratio < 100, 4,
+                           np.where(ratio < 200, 3,
+                           np.where(ratio < 300, 2,
+                           np.where(ratio < 400, 1, 0))))
+
+    # Total partial SOFA (sum of available components)
+    scores[:, 6] = scores[:, :6].sum(axis=1)
+
+    return scores
+
+
+def _qsofa_score(raw_values, feature_columns, norm_stats):
+    """Compute qSOFA score (0-3): SBP<=100, Resp>=22, altered mentation (not available).
+
+    Returns array of shape (n_hours, 3): SBP component, Resp component, total.
+    """
+    n_hours = raw_values.shape[0]
+    scores = np.zeros((n_hours, 3), dtype=np.float32)
+
+    if "SBP" in feature_columns:
+        idx = feature_columns.index("SBP")
+        sbp_raw = _unnormalize(raw_values[:, idx], "SBP", norm_stats)
+        scores[:, 0] = (sbp_raw <= 100).astype(np.float32)
+
+    if "Resp" in feature_columns:
+        idx = feature_columns.index("Resp")
+        resp_raw = _unnormalize(raw_values[:, idx], "Resp", norm_stats)
+        scores[:, 1] = (resp_raw >= 22).astype(np.float32)
+
+    scores[:, 2] = scores[:, 0] + scores[:, 1]
+    return scores
+
+
+def _news_vital_scores(raw_values, feature_columns, norm_stats):
+    """Compute NEWS-style vital sign scoring.
+
+    Returns array of shape (n_hours, 4): HR score, Temp score, Resp score, total.
+    """
+    n_hours = raw_values.shape[0]
+    scores = np.zeros((n_hours, 4), dtype=np.float32)
+
+    # HR: 3 if <=40 or >=131; 2 if 111-130; 1 if 41-50 or 91-110
+    if "HR" in feature_columns:
+        idx = feature_columns.index("HR")
+        hr = _unnormalize(raw_values[:, idx], "HR", norm_stats)
+        scores[:, 0] = np.where((hr <= 40) | (hr >= 131), 3,
+                       np.where((hr >= 111) & (hr <= 130), 2,
+                       np.where(((hr >= 41) & (hr <= 50)) | ((hr >= 91) & (hr <= 110)), 1, 0)))
+
+    # Temp: 3 if <=35; 2 if >=39.1; 1 if 35.1-36.0 or 38.1-39.0
+    if "Temp" in feature_columns:
+        idx = feature_columns.index("Temp")
+        temp = _unnormalize(raw_values[:, idx], "Temp", norm_stats)
+        scores[:, 1] = np.where(temp <= 35.0, 3,
+                       np.where(temp >= 39.1, 2,
+                       np.where(((temp >= 35.1) & (temp <= 36.0)) | ((temp >= 38.1) & (temp <= 39.0)), 1, 0)))
+
+    # Resp: 3 if <8 or >25; 2 if 21-24; 1 if 9-11
+    if "Resp" in feature_columns:
+        idx = feature_columns.index("Resp")
+        resp = _unnormalize(raw_values[:, idx], "Resp", norm_stats)
+        scores[:, 2] = np.where((resp < 8) | (resp > 25), 3,
+                       np.where((resp >= 21) & (resp <= 24), 2,
+                       np.where((resp >= 9) & (resp <= 11), 1, 0)))
+
+    scores[:, 3] = scores[:, :3].sum(axis=1)
+    return scores
+
+
+def _clinical_ratios(raw_values, feature_columns, norm_stats):
+    """Compute clinical ratio features from raw values.
+
+    Returns array of shape (n_hours, N) with: Shock Index, BUN/Creatinine,
+    SaO2/FiO2, Pulse Pressure, Cardiac Output proxy.
+    """
+    n_hours = raw_values.shape[0]
+    ratios = []
+
+    def _get_raw(col):
+        if col not in feature_columns:
+            return None
+        idx = feature_columns.index(col)
+        return _unnormalize(raw_values[:, idx], col, norm_stats)
+
+    # Shock Index: HR / SBP (normal ~0.5-0.7, elevated >0.9 indicates shock)
+    hr_raw = _get_raw("HR")
+    sbp_raw = _get_raw("SBP")
+    if hr_raw is not None and sbp_raw is not None:
+        with np.errstate(divide="ignore", invalid="ignore"):
+            si = np.where(sbp_raw > 0, hr_raw / sbp_raw, 0)
+        ratios.append(si.reshape(-1, 1))
+
+    # BUN / Creatinine ratio (normal 10-20, elevated suggests pre-renal issues)
+    bun_raw = _get_raw("BUN")
+    creat_raw = _get_raw("Creatinine")
+    if bun_raw is not None and creat_raw is not None:
+        with np.errstate(divide="ignore", invalid="ignore"):
+            bc = np.where(creat_raw > 0, bun_raw / creat_raw, 0)
+        ratios.append(bc.reshape(-1, 1))
+
+    # SaO2 / FiO2 ratio (oxygenation index)
+    sao2_raw = _get_raw("SaO2")
+    fio2_raw = _get_raw("FiO2")
+    if sao2_raw is not None and fio2_raw is not None:
+        with np.errstate(divide="ignore", invalid="ignore"):
+            sf = np.where(fio2_raw > 0, sao2_raw / fio2_raw, 0)
+        ratios.append(sf.reshape(-1, 1))
+
+    # Pulse Pressure: SBP - DBP (narrow PP indicates poor cardiac output)
+    dbp_raw = _get_raw("DBP")
+    if sbp_raw is not None and dbp_raw is not None:
+        pp = sbp_raw - dbp_raw
+        ratios.append(pp.reshape(-1, 1))
+
+    # Cardiac Output proxy: (SBP - DBP) * HR
+    if sbp_raw is not None and dbp_raw is not None and hr_raw is not None:
+        co = (sbp_raw - dbp_raw) * hr_raw
+        ratios.append(co.reshape(-1, 1))
+
+    if ratios:
+        return np.hstack(ratios)
+    return np.zeros((n_hours, 0), dtype=np.float32)
+
+
+def _differential_features(base, feature_columns):
+    """Compute value changes between consecutive observations for all clinical features.
+
+    Unlike rate_of_change (current - 6h ago), this computes the change between
+    consecutive non-missing values, capturing short-term clinical deterioration.
+    Uses the z-scored values directly (differences are scale-invariant).
+
+    Returns array of shape (n_hours, n_clinical_features).
+    """
+    clinical_cols = [c for c in feature_columns if c in VITAL_SIGNS + LAB_VALUES]
+    clinical_indices = [feature_columns.index(c) for c in clinical_cols]
+    n_hours = base.shape[0]
+    n_feats = len(clinical_indices)
+
+    diffs = np.zeros((n_hours, n_feats), dtype=np.float32)
+    for j, ci in enumerate(clinical_indices):
+        # Use missingness mask if available (col_missing = 1 means was missing)
+        mask_name = f"{clinical_cols[j]}_missing"
+        if mask_name in feature_columns:
+            mask_idx = feature_columns.index(mask_name)
+            observed = base[:, mask_idx] < 0.5  # 0 = observed
+        else:
+            observed = np.ones(n_hours, dtype=bool)
+
+        last_val = base[0, ci]
+        for t in range(n_hours):
+            if observed[t]:
+                diffs[t, j] = base[t, ci] - last_val
+                last_val = base[t, ci]
+            # else: keep 0 (no change when not observed)
+
+    return diffs
+
+
+def create_baseline_features(patient_df, feature_columns, enhanced=False, norm_stats=None):
     """Create expanded feature set for a single patient.
 
     For each hour, produces:
@@ -48,11 +267,16 @@ def create_baseline_features(patient_df, feature_columns, enhanced=False):
       - Rate of change (current - 6h ago) for vital signs
       - Time-weighted averages (exponential decay) for vital signs
       - Clinical interaction features (shock index, MAP trend, etc.)
+      - Clinical scores: SOFA components, qSOFA, NEWS (requires norm_stats)
+      - Clinical ratios: Shock Index, BUN/Creatinine, SaO2/FiO2, Pulse Pressure
+      - Differential features: consecutive observation changes for all clinical vars
 
     Args:
         patient_df: Preprocessed DataFrame with 120 feature columns + SepsisLabel.
         feature_columns: List of the 120 feature column names.
         enhanced: If True, compute additional engineered features.
+        norm_stats: Dict of {feature: {mean, std, p1, p99}} for un-normalizing.
+            Required for clinical score features (SOFA, qSOFA, NEWS, ratios).
 
     Returns:
         2D numpy array (n_hours, n_expanded_features).
@@ -147,10 +371,34 @@ def create_baseline_features(patient_df, feature_columns, enhanced=False):
         if interactions:
             parts.extend(interactions)
 
+        # --- New clinical features (require norm_stats for raw thresholds) ---
+
+        # Differential features: consecutive observation changes
+        diffs = _differential_features(base, feature_columns)
+        parts.append(diffs)
+
+        if norm_stats is not None:
+            # SOFA score components (7 features)
+            sofa = _sofa_score_components(base, feature_columns, norm_stats)
+            parts.append(sofa)
+
+            # qSOFA score (3 features)
+            qsofa = _qsofa_score(base, feature_columns, norm_stats)
+            parts.append(qsofa)
+
+            # NEWS-style vital scores (4 features)
+            news = _news_vital_scores(base, feature_columns, norm_stats)
+            parts.append(news)
+
+            # Clinical ratios from raw values (up to 5 features)
+            ratios = _clinical_ratios(base, feature_columns, norm_stats)
+            if ratios.shape[1] > 0:
+                parts.append(ratios)
+
     return np.hstack(parts)
 
 
-def get_baseline_feature_names(feature_columns, enhanced=False):
+def get_baseline_feature_names(feature_columns, enhanced=False, has_norm_stats=False):
     """Return names for the expanded baseline feature set."""
     vital_cols = [c for c in feature_columns if c in VITAL_SIGNS]
     names = list(feature_columns)
@@ -177,16 +425,48 @@ def get_baseline_feature_names(feature_columns, enhanced=False):
         if "Temp" in vital_cols:
             names.append("temp_deviation")
 
+        # Differential features for all clinical vars
+        clinical_cols = [c for c in feature_columns if c in VITAL_SIGNS + LAB_VALUES]
+        names.extend([f"{c}_diff" for c in clinical_cols])
+
+        if has_norm_stats:
+            # SOFA components (7)
+            names.extend([
+                "sofa_map", "sofa_creatinine", "sofa_bilirubin",
+                "sofa_platelets", "sofa_respiration", "sofa_coagulation",
+                "sofa_total",
+            ])
+
+            # qSOFA (3)
+            names.extend(["qsofa_sbp", "qsofa_resp", "qsofa_total"])
+
+            # NEWS scores (4)
+            names.extend(["news_hr", "news_temp", "news_resp", "news_total"])
+
+            # Clinical ratios (up to 5)
+            if "HR" in feature_columns and "SBP" in feature_columns:
+                names.append("shock_index")
+            if "BUN" in feature_columns and "Creatinine" in feature_columns:
+                names.append("bun_creatinine_ratio")
+            if "SaO2" in feature_columns and "FiO2" in feature_columns:
+                names.append("sao2_fio2_ratio")
+            if "SBP" in feature_columns and "DBP" in feature_columns:
+                names.append("pulse_pressure")
+            if "SBP" in feature_columns and "DBP" in feature_columns and "HR" in feature_columns:
+                names.append("cardiac_output_proxy")
+
     return names
 
 
-def prepare_baseline_data(patients_dict, feature_columns, enhanced=False):
+def prepare_baseline_data(patients_dict, feature_columns, enhanced=False, norm_stats=None):
     """Flatten patient dict into arrays for LightGBM.
 
     Args:
         patients_dict: Dict of preprocessed DataFrames (120 features + SepsisLabel).
         feature_columns: List of the 120 feature column names.
         enhanced: If True, compute additional engineered features.
+        norm_stats: Dict of {feature: {mean, std, p1, p99}} for un-normalizing.
+            Pass this to enable clinical score features (SOFA, qSOFA, NEWS, ratios).
 
     Returns:
         (X, y, patient_ids, hour_indices) where X is (n_samples, n_features).
@@ -194,7 +474,7 @@ def prepare_baseline_data(patients_dict, feature_columns, enhanced=False):
     all_X, all_y, all_pids, all_hours = [], [], [], []
 
     for pid, df in patients_dict.items():
-        X_patient = create_baseline_features(df, feature_columns, enhanced=enhanced)
+        X_patient = create_baseline_features(df, feature_columns, enhanced=enhanced, norm_stats=norm_stats)
         y_patient = df["SepsisLabel"].values.astype(np.float32)
 
         all_X.append(X_patient)
@@ -257,8 +537,11 @@ class LightGBMBaseline:
         "seed": 42,
     }
 
-    def __init__(self, params=None, improved=False):
+    def __init__(self, params=None, improved=False, scale_pos_weight=None):
         self.params = dict(self.IMPROVED_PARAMS if improved else self.DEFAULT_PARAMS)
+        if scale_pos_weight is not None:
+            self.params.pop("is_unbalance", None)
+            self.params["scale_pos_weight"] = scale_pos_weight
         if params:
             self.params.update(params)
         self.model = None
@@ -341,7 +624,7 @@ class LightGBMBaseline:
 
 
 def train_and_evaluate_baseline(train_patients, val_patients, feature_columns,
-                                improved=False):
+                                improved=False, scale_pos_weight=None):
     """End-to-end baseline training and evaluation.
 
     Args:
@@ -349,6 +632,7 @@ def train_and_evaluate_baseline(train_patients, val_patients, feature_columns,
         val_patients: Dict of preprocessed validation patient DataFrames.
         feature_columns: List of 120 feature column names.
         improved: If True, use enhanced features and improved hyperparameters.
+        scale_pos_weight: If set, use explicit class weight instead of is_unbalance.
 
     Returns:
         (model, best_threshold, utility_score, feature_importance_df)
@@ -369,11 +653,12 @@ def train_and_evaluate_baseline(train_patients, val_patients, feature_columns,
     print(f"  Val: {X_val.shape[0]:,} samples")
 
     mode = "improved" if improved else "default"
-    print(f"Training LightGBM ({mode} params)...")
-    model = LightGBMBaseline(improved=improved)
+    spw_str = f", scale_pos_weight={scale_pos_weight}" if scale_pos_weight else ""
+    print(f"Training LightGBM ({mode} params{spw_str})...")
+    model = LightGBMBaseline(improved=improved, scale_pos_weight=scale_pos_weight)
     model.fit(X_train, y_train, X_val, y_val, feature_names=feature_names)
 
-    print("Finding optimal threshold...")
+    print("Finding optimal thresholds...")
     val_probs = model.predict_proba(X_val)
 
     best_threshold = 0.5

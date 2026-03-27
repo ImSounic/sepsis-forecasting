@@ -197,10 +197,10 @@ class TestSepsisTrainer:
 
     def test_checkpoint_saved(self):
         import os
+        import shutil
         ckpt_dir = "/tmp/test_sepsis_ckpt_save"
         trainer = _make_trainer(config_overrides={"checkpoint_dir": ckpt_dir})
         trainer.train(epochs=2)
-        assert os.path.exists(os.path.join(ckpt_dir, "best.pt"))
+        assert os.path.exists(os.path.join(ckpt_dir, "gru", "best.pt"))
         # Clean up
-        os.remove(os.path.join(ckpt_dir, "best.pt"))
-        os.rmdir(ckpt_dir)
+        shutil.rmtree(ckpt_dir)
