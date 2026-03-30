@@ -205,6 +205,7 @@ class SepsisTrainer:
         self.model.train()
         total_loss = 0.0
         n_batches = 0
+        total_batches = len(self.train_loader)
 
         for features, labels, masks, _, _ in self.train_loader:
             features = features.to(self.device)
@@ -212,8 +213,12 @@ class SepsisTrainer:
             masks = masks.to(self.device)
 
             if n_batches == 0:
-                print(f"  [DEBUG] Device: {self.device} | Features on: {features.device} | "
+                print(f"  Device: {self.device} | Features on: {features.device} | "
                       f"Batch shape: {features.shape} | AMP: {self.scaler is not None}")
+
+            if n_batches % 500 == 0:
+                print(f"  Batch {n_batches}/{total_batches} "
+                      f"(loss: {total_loss / max(n_batches, 1):.4f})", flush=True)
 
             self.optimizer.zero_grad()
 
