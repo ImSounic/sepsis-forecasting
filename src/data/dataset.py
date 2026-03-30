@@ -59,8 +59,8 @@ class SepsisDataset(Dataset):
                 pad_len = seq_length - actual_len
 
                 # Write directly into pre-allocated tensor
-                self.all_features[idx, pad_len:] = torch.from_numpy(window)
-                self.all_labels[idx] = labels[hour]
+                self.all_features[idx, pad_len:] = torch.from_numpy(window.copy())
+                self.all_labels[idx] = float(labels[hour])
                 self.all_masks[idx, pad_len:] = 1.0
 
                 self.sample_pids.append(pid)
