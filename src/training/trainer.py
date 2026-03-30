@@ -167,6 +167,24 @@ class SepsisTrainer:
         use_amp = config.get("mixed_precision", True) and self.device.type == "cuda"
         self.scaler = torch.amp.GradScaler() if use_amp else None
 
+    def resume_from_checkpoint(self, checkpoint_path):
+        """Load model, optimizer, and scheduler state from a checkpoint.
+
+        Returns tuple of (epoch, best_score, patience_counter).
+        """
+        checkpoint = torch.load(checkpoint_path, map_location=self.device, weights_only=False)
+        self.model.load_state_dict(checkpoint["model_state_dict"])
+        self.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+        if "scheduler_state_dict" in checkpoint:
+            self.scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
+        resumed_epoch = checkpoint.get("epoch", 0)
+        best_score = checkpoint.get("best_score", float("-inf"))
+        patience_counter = checkpoint.get("patience_counter", 0)
+        print(f"Resumed from checkpoint at epoch {resumed_epoch} "
+              f"(utility={checkpoint.get('utility', 'N/A'):.4f}, "
+              f"f1={checkpoint.get('f1', 'N/A'):.4f})")
+        return resumed_epoch, best_score, patience_counter
+
     def _compute_pos_weight(self):
         """Compute pos_weight = num_negative / num_positive from training labels."""
         total, positive = 0, 0
@@ -299,7 +317,8 @@ class SepsisTrainer:
 
         return best
 
-    def train(self, epochs, early_stop_metric="utility", checkpoint_subdir="gru"):
+    def train(self, epochs, early_stop_metric="utility", checkpoint_subdir="gru",
+              resume_epoch=0, resume_best_score=None, resume_patience=0):
         """Full training loop with early stopping and checkpointing.
 
         Args:
@@ -308,6 +327,9 @@ class SepsisTrainer:
                 One of 'utility', 'f1', 'youden'. Default 'utility'.
             checkpoint_subdir: Subdirectory under checkpoint_dir for saving
                 the best model. Default 'gru'.
+            resume_epoch: Epoch to resume from (0 = start fresh).
+            resume_best_score: Best score from previous run (for resume).
+            resume_patience: Patience counter from previous run (for resume).
 
         Returns:
             History dict with per-epoch metrics.
@@ -330,10 +352,11 @@ class SepsisTrainer:
             "lr": [],
         }
 
-        best_score = float("-inf")
-        patience_counter = 0
+        best_score = resume_best_score if resume_best_score is not None else float("-inf")
+        patience_counter = resume_patience
+        start_epoch = resume_epoch + 1
 
-        for epoch in range(1, epochs + 1):
+        for epoch in range(start_epoch, epochs + 1):
             train_loss = self.train_epoch()
 
             val_loss, preds, labels, pids, hours = self.validate()
@@ -377,24 +400,28 @@ class SepsisTrainer:
                 f"Thr({metric_label}): {current_threshold:.2f} | LR: {current_lr:.1e}"
             )
 
+            # Save last.pt every epoch (for resume on crash/disconnect)
+            checkpoint_data = {
+                "epoch": epoch,
+                "model_state_dict": self.model.state_dict(),
+                "optimizer_state_dict": self.optimizer.state_dict(),
+                "scheduler_state_dict": self.scheduler.state_dict(),
+                "utility": utility,
+                "f1": f1,
+                "youden": youden,
+                "threshold": current_threshold,
+                "early_stop_metric": early_stop_metric,
+                "all_thresholds": all_thresholds,
+                "best_score": best_score,
+                "patience_counter": patience_counter,
+            }
+            torch.save(checkpoint_data, os.path.join(gru_checkpoint_dir, "last.pt"))
+
             # Early stopping + checkpointing based on selected metric
             if current_score > best_score:
                 best_score = current_score
                 patience_counter = 0
-                torch.save(
-                    {
-                        "epoch": epoch,
-                        "model_state_dict": self.model.state_dict(),
-                        "optimizer_state_dict": self.optimizer.state_dict(),
-                        "utility": utility,
-                        "f1": f1,
-                        "youden": youden,
-                        "threshold": current_threshold,
-                        "early_stop_metric": early_stop_metric,
-                        "all_thresholds": all_thresholds,
-                    },
-                    os.path.join(gru_checkpoint_dir, "best.pt"),
-                )
+                torch.save(checkpoint_data, os.path.join(gru_checkpoint_dir, "best.pt"))
             else:
                 patience_counter += 1
                 if patience_counter >= self.patience:

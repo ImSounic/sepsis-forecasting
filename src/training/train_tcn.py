@@ -39,7 +39,7 @@ warnings.filterwarnings("ignore", category=pd.errors.PerformanceWarning)
 
 def main(config_path: str, max_patients: int = None, no_cache: bool = False,
          pos_weight_multiplier: float = None, early_stop_metric: str = None,
-         checkpoint_name: str = None):
+         checkpoint_name: str = None, resume: bool = False):
     config = load_config(config_path)
     logger = setup_logging(config["output"]["log_dir"])
     seed = config.get("seed", 42)
@@ -157,6 +157,19 @@ def main(config_path: str, max_patients: int = None, no_cache: bool = False,
     # Train
     early_metric = early_stop_metric or "utility"
     checkpoint_sub = checkpoint_name or "tcn"
+
+    # Resume from last checkpoint if requested
+    resume_epoch = 0
+    resume_best = None
+    resume_pat = 0
+    if resume:
+        last_ckpt = os.path.join(config["output"]["model_dir"], checkpoint_sub, "last.pt")
+        if os.path.exists(last_ckpt):
+            resume_epoch, resume_best, resume_pat = trainer.resume_from_checkpoint(last_ckpt)
+            logger.info("Resuming from epoch %d", resume_epoch)
+        else:
+            logger.warning("--resume flag set but no last.pt found, starting fresh")
+
     logger.info(
         "Starting TCN training for %d epochs (early_stop=%s, checkpoint=%s)...",
         config["training"]["epochs"], early_metric, checkpoint_sub,
@@ -165,6 +178,9 @@ def main(config_path: str, max_patients: int = None, no_cache: bool = False,
         config["training"]["epochs"],
         early_stop_metric=early_metric,
         checkpoint_subdir=checkpoint_sub,
+        resume_epoch=resume_epoch,
+        resume_best_score=resume_best,
+        resume_patience=resume_pat,
     )
 
     # Final report
@@ -204,6 +220,10 @@ if __name__ == "__main__":
         "--checkpoint-name", default=None,
         help="Subdirectory name under model_dir for checkpoints (default: tcn)",
     )
+    parser.add_argument(
+        "--resume", action="store_true",
+        help="Resume training from last checkpoint (last.pt)",
+    )
     args = parser.parse_args()
     main(
         args.config,
@@ -212,4 +232,5 @@ if __name__ == "__main__":
         pos_weight_multiplier=args.pos_weight_multiplier,
         early_stop_metric=args.early_stop_metric,
         checkpoint_name=args.checkpoint_name,
+        resume=args.resume,
     )
