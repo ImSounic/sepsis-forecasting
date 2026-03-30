@@ -216,7 +216,7 @@ class SepsisTrainer:
                 print(f"  Device: {self.device} | Features on: {features.device} | "
                       f"Batch shape: {features.shape} | AMP: {self.scaler is not None}")
 
-            if n_batches % 500 == 0:
+            if n_batches % 100 == 0:
                 print(f"  Batch {n_batches}/{total_batches} "
                       f"(loss: {total_loss / max(n_batches, 1):.4f})", flush=True)
 
