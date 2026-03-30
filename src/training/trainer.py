@@ -211,6 +211,10 @@ class SepsisTrainer:
             labels = labels.to(self.device)
             masks = masks.to(self.device)
 
+            if n_batches == 0:
+                print(f"  [DEBUG] Device: {self.device} | Features on: {features.device} | "
+                      f"Batch shape: {features.shape} | AMP: {self.scaler is not None}")
+
             self.optimizer.zero_grad()
 
             if self.scaler is not None:
