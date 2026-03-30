@@ -1,6 +1,6 @@
-# Sepsis Forecasting - Optimized Configuration
-# Based on Optuna Trial 8 (best utility: 0.329)
-# GRU + Temporal Attention (bidirectional)
+# Sepsis Forecasting - TCN Configuration
+# Temporal Convolutional Network with causal dilated convolutions
+# Causal by design — no future information leakage
 
 # Data
 data:
@@ -11,18 +11,19 @@ data:
 
 # Model
 model:
+  type: tcn
   input_size: 120
-  hidden_size: 256
-  num_layers: 1
-  dropout: 0.1
-  bidirectional: false
+  hidden_size: 128
+  num_layers: 4
+  kernel_size: 3
+  dropout: 0.2
   attention_size: 64
 
 # Training
 training:
   batch_size: 32
   epochs: 50
-  lr: 0.00095
+  lr: 0.001
   weight_decay: 0.0001
   patience: 10
   gradient_clip: 1.0

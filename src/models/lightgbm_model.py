@@ -165,6 +165,92 @@ def _news_vital_scores(raw_values, feature_columns, norm_stats):
     return scores
 
 
+def _sirs_score(raw_values, feature_columns, norm_stats):
+    """Compute SIRS score (0-4): Temp, HR, Resp/PaCO2, WBC components.
+
+    Returns array of shape (n_hours, 5): Temp, HR, Resp, WBC components + total.
+    """
+    n_hours = raw_values.shape[0]
+    scores = np.zeros((n_hours, 5), dtype=np.float32)
+
+    def _get_raw(col):
+        if col not in feature_columns:
+            return None
+        idx = feature_columns.index(col)
+        return _unnormalize(raw_values[:, idx], col, norm_stats)
+
+    # Temp: >38.0 or <36.0
+    temp_raw = _get_raw("Temp")
+    if temp_raw is not None:
+        scores[:, 0] = ((temp_raw > 38.0) | (temp_raw < 36.0)).astype(np.float32)
+
+    # HR: >90
+    hr_raw = _get_raw("HR")
+    if hr_raw is not None:
+        scores[:, 1] = (hr_raw > 90).astype(np.float32)
+
+    # Resp: >20 or PaCO2 < 32
+    resp_raw = _get_raw("Resp")
+    paco2_raw = _get_raw("PaCO2")
+    if resp_raw is not None:
+        resp_crit = (resp_raw > 20).astype(np.float32)
+        if paco2_raw is not None:
+            resp_crit = np.maximum(resp_crit, (paco2_raw < 32).astype(np.float32))
+        scores[:, 2] = resp_crit
+
+    # WBC: >12 or <4 (thousands)
+    wbc_raw = _get_raw("WBC")
+    if wbc_raw is not None:
+        scores[:, 3] = ((wbc_raw > 12.0) | (wbc_raw < 4.0)).astype(np.float32)
+
+    scores[:, 4] = scores[:, :4].sum(axis=1)
+    return scores
+
+
+def _mews_score(raw_values, feature_columns, norm_stats):
+    """Compute Modified Early Warning Score (MEWS).
+
+    Returns array of shape (n_hours, 5): SBP, HR, Resp, Temp components + total.
+    """
+    n_hours = raw_values.shape[0]
+    scores = np.zeros((n_hours, 5), dtype=np.float32)
+
+    def _get_raw(col):
+        if col not in feature_columns:
+            return None
+        idx = feature_columns.index(col)
+        return _unnormalize(raw_values[:, idx], col, norm_stats)
+
+    # SBP: 0 (101-199), 1 (81-100), 2 (71-80 or >=200), 3 (<=70)
+    sbp_raw = _get_raw("SBP")
+    if sbp_raw is not None:
+        scores[:, 0] = np.where(sbp_raw <= 70, 3,
+                       np.where((sbp_raw <= 80) | (sbp_raw >= 200), 2,
+                       np.where(sbp_raw <= 100, 1, 0)))
+
+    # HR: 0 (51-100), 1 (41-50 or 101-110), 2 (<=40 or 111-129), 3 (>=130)
+    hr_raw = _get_raw("HR")
+    if hr_raw is not None:
+        scores[:, 1] = np.where(hr_raw >= 130, 3,
+                       np.where((hr_raw <= 40) | ((hr_raw >= 111) & (hr_raw <= 129)), 2,
+                       np.where(((hr_raw >= 41) & (hr_raw <= 50)) | ((hr_raw >= 101) & (hr_raw <= 110)), 1, 0)))
+
+    # Resp: 0 (9-14), 1 (15-20), 2 (21-29 or <9), 3 (>=30)
+    resp_raw = _get_raw("Resp")
+    if resp_raw is not None:
+        scores[:, 2] = np.where(resp_raw >= 30, 3,
+                       np.where((resp_raw < 9) | ((resp_raw >= 21) & (resp_raw <= 29)), 2,
+                       np.where((resp_raw >= 15) & (resp_raw <= 20), 1, 0)))
+
+    # Temp: 0 (35.0-38.4), 2 (<35.0 or >=38.5)
+    temp_raw = _get_raw("Temp")
+    if temp_raw is not None:
+        scores[:, 3] = np.where((temp_raw < 35.0) | (temp_raw >= 38.5), 2, 0)
+
+    scores[:, 4] = scores[:, :4].sum(axis=1)
+    return scores
+
+
 def _clinical_ratios(raw_values, feature_columns, norm_stats):
     """Compute clinical ratio features from raw values.
 
@@ -395,6 +481,88 @@ def create_baseline_features(patient_df, feature_columns, enhanced=False, norm_s
             if ratios.shape[1] > 0:
                 parts.append(ratios)
 
+            # SIRS score (5 features)
+            sirs = _sirs_score(base, feature_columns, norm_stats)
+            parts.append(sirs)
+
+            # MEWS score (5 features)
+            mews = _mews_score(base, feature_columns, norm_stats)
+            parts.append(mews)
+
+        # --- Additional engineered features (no norm_stats required) ---
+
+        # Multi-window rate of change: 3h and 12h
+        for window, label in [(3, "3h"), (12, "12h")]:
+            roc = np.zeros((n_hours, n_vitals), dtype=np.float32)
+            for t in range(n_hours):
+                t_prev = max(0, t - window)
+                for j, vi in enumerate(vital_indices):
+                    roc[t, j] = base[t, vi] - base[t_prev, vi]
+            parts.append(roc)
+
+        # Second EMA half-life (6 hours) for vital signs
+        tw_avg_6h = np.zeros((n_hours, n_vitals), dtype=np.float32)
+        decay_6h = np.exp(-np.log(2) / 6.0)
+        for j, vi in enumerate(vital_indices):
+            running = base[0, vi]
+            for t in range(n_hours):
+                running = decay_6h * running + (1 - decay_6h) * base[t, vi]
+                tw_avg_6h[t, j] = running
+        parts.append(tw_avg_6h)
+
+        # Lab cross-interactions (on z-scored values)
+        lab_interactions = []
+
+        def _safe_idx(col):
+            return feature_columns.index(col) if col in feature_columns else None
+
+        lactate_idx = _safe_idx("Lactate")
+        wbc_idx = _safe_idx("WBC")
+        creat_idx = _safe_idx("Creatinine")
+        bun_idx = _safe_idx("BUN")
+        platelets_idx = _safe_idx("Platelets")
+
+        # Lactate * HR
+        if lactate_idx is not None and hr_idx is not None:
+            lab_interactions.append(
+                (base[:, lactate_idx] * base[:, hr_idx]).reshape(-1, 1))
+        # WBC * Temp
+        if wbc_idx is not None and temp_idx is not None:
+            lab_interactions.append(
+                (base[:, wbc_idx] * base[:, temp_idx]).reshape(-1, 1))
+        # Creatinine * MAP (negative = bad)
+        if creat_idx is not None and map_idx is not None:
+            lab_interactions.append(
+                (base[:, creat_idx] * base[:, map_idx]).reshape(-1, 1))
+        # BUN * Lactate
+        if bun_idx is not None and lactate_idx is not None:
+            lab_interactions.append(
+                (base[:, bun_idx] * base[:, lactate_idx]).reshape(-1, 1))
+        # Platelets_diff * WBC_diff (trajectory interaction)
+        plt_diff_name = "Platelets_diff"
+        wbc_diff_name = "WBC_diff"
+        # These diffs were computed earlier; use the differential features array
+        clinical_cols = [c for c in feature_columns if c in VITAL_SIGNS + LAB_VALUES]
+        if "Platelets" in clinical_cols and "WBC" in clinical_cols:
+            plt_diff_idx = clinical_cols.index("Platelets")
+            wbc_diff_idx = clinical_cols.index("WBC")
+            lab_interactions.append(
+                (diffs[:, plt_diff_idx] * diffs[:, wbc_diff_idx]).reshape(-1, 1))
+
+        if lab_interactions:
+            parts.extend(lab_interactions)
+
+        # Lab deviation from population norm (absolute z-score)
+        key_labs = ["Lactate", "WBC", "Creatinine", "BUN",
+                    "Platelets", "Bilirubin_total", "Glucose", "Temp"]
+        lab_dev_parts = []
+        for lab in key_labs:
+            if lab in feature_columns:
+                idx = feature_columns.index(lab)
+                lab_dev_parts.append(np.abs(base[:, idx:idx + 1]))
+        if lab_dev_parts:
+            parts.extend(lab_dev_parts)
+
     return np.hstack(parts)
 
 
@@ -454,6 +622,43 @@ def get_baseline_feature_names(feature_columns, enhanced=False, has_norm_stats=F
                 names.append("pulse_pressure")
             if "SBP" in feature_columns and "DBP" in feature_columns and "HR" in feature_columns:
                 names.append("cardiac_output_proxy")
+
+            # SIRS score (5)
+            names.extend([
+                "sirs_temp", "sirs_hr", "sirs_resp", "sirs_wbc", "sirs_total",
+            ])
+
+            # MEWS score (5)
+            names.extend([
+                "mews_sbp", "mews_hr", "mews_resp", "mews_temp", "mews_total",
+            ])
+
+        # Multi-window rate of change (3h, 12h)
+        names.extend([f"{c}_roc_3h" for c in vital_cols])
+        names.extend([f"{c}_roc_12h" for c in vital_cols])
+
+        # Second EMA half-life (6h)
+        names.extend([f"{c}_tw_avg_6h" for c in vital_cols])
+
+        # Lab cross-interactions
+        if "Lactate" in feature_columns and "HR" in feature_columns:
+            names.append("lactate_hr_product")
+        if "WBC" in feature_columns and "Temp" in feature_columns:
+            names.append("wbc_temp_product")
+        if "Creatinine" in feature_columns and "MAP" in feature_columns:
+            names.append("creatinine_map_product")
+        if "BUN" in feature_columns and "Lactate" in feature_columns:
+            names.append("bun_lactate_product")
+        clinical_cols = [c for c in feature_columns if c in VITAL_SIGNS + LAB_VALUES]
+        if "Platelets" in clinical_cols and "WBC" in clinical_cols:
+            names.append("platelets_diff_wbc_diff_product")
+
+        # Lab deviation from norm
+        key_labs = ["Lactate", "WBC", "Creatinine", "BUN",
+                    "Platelets", "Bilirubin_total", "Glucose", "Temp"]
+        for lab in key_labs:
+            if lab in feature_columns:
+                names.append(f"{lab}_abs_zscore")
 
     return names
 

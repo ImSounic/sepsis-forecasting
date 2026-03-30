@@ -19,6 +19,7 @@ from src.data.dataset import SepsisDataset
 from src.models.lightgbm_model import LightGBMBaseline, prepare_baseline_data
 from src.models.ensemble import SepsisEnsemble, filter_by_iculos
 from src.models.gru import GRUWithAttention
+from src.models.tcn import TCNWithAttention
 from src.training.train import load_config
 from src.training.trainer import compute_utility_score
 
@@ -311,7 +312,45 @@ def _print_agreement_analysis(gru_probs, lgb_probs, labels_arr, threshold):
         print(f"      No true positives at this threshold")
 
 
-def main(config_path, full_analysis=False):
+def _load_deep_model(config, device, model_type="gru"):
+    """Load either GRU or TCN model from checkpoint."""
+    model_dir = os.path.join(config["output"]["model_dir"], model_type)
+    checkpoint_path = os.path.join(model_dir, "best.pt")
+    if not os.path.exists(checkpoint_path):
+        import glob
+        pt_files = glob.glob(os.path.join(model_dir, "*.pt"))
+        if pt_files:
+            checkpoint_path = pt_files[0]
+        else:
+            print(f"ERROR: No {model_type.upper()} checkpoint in {model_dir}")
+            return None, None
+    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=True)
+
+    if model_type == "tcn":
+        model = TCNWithAttention(
+            input_size=config["model"]["input_size"],
+            hidden_size=config["model"]["hidden_size"],
+            num_layers=config["model"]["num_layers"],
+            dropout=config["model"]["dropout"],
+            kernel_size=config["model"].get("kernel_size", 3),
+            attention_size=config["model"].get("attention_size", 64),
+        )
+    else:
+        model = GRUWithAttention(
+            input_size=config["model"]["input_size"],
+            hidden_size=config["model"]["hidden_size"],
+            num_layers=config["model"]["num_layers"],
+            dropout=config["model"]["dropout"],
+            bidirectional=config["model"].get("bidirectional", False),
+            attention_size=config["model"].get("attention_size", 64),
+        )
+
+    model.load_state_dict(checkpoint["model_state_dict"])
+    model.to(device)
+    return model, checkpoint
+
+
+def main(config_path, full_analysis=False, model_type="gru"):
     config = load_config(config_path)
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"Device: {device}")
@@ -330,34 +369,15 @@ def main(config_path, full_analysis=False):
     )
     print(f"Validation samples: {len(val_dataset):,}")
 
-    # Load GRU model
-    gru_dir = os.path.join(config["output"]["model_dir"], "gru")
-    checkpoint_path = os.path.join(gru_dir, "best.pt")
-    if not os.path.exists(checkpoint_path):
-        import glob
-        pt_files = glob.glob(os.path.join(gru_dir, "*.pt"))
-        if pt_files:
-            checkpoint_path = pt_files[0]
-        else:
-            print(f"ERROR: No GRU checkpoint in {gru_dir}")
-            return
-    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=True)
-
-    model = GRUWithAttention(
-        input_size=config["model"]["input_size"],
-        hidden_size=config["model"]["hidden_size"],
-        num_layers=config["model"]["num_layers"],
-        dropout=config["model"]["dropout"],
-        bidirectional=config["model"]["bidirectional"],
-        attention_size=config["model"].get("attention_size", 64),
-    )
-    model.load_state_dict(checkpoint["model_state_dict"])
-    model.to(device)
-    print(f"Loaded GRU checkpoint (epoch {checkpoint['epoch']+1}, "
+    # Load deep learning model (GRU or TCN)
+    model, checkpoint = _load_deep_model(config, device, model_type)
+    if model is None:
+        return
+    print(f"Loaded {model_type.upper()} checkpoint (epoch {checkpoint['epoch']+1}, "
           f"utility={checkpoint['utility']:.4f})")
 
-    # GRU predictions
-    print("\nRunning GRU inference...")
+    # Deep model predictions
+    print(f"\nRunning {model_type.upper()} inference...")
     gru_probs, labels, pids, hours = get_gru_predictions(model, val_loader, device)
     print(f"  {len(gru_probs):,} predictions collected")
 
@@ -493,5 +513,7 @@ if __name__ == "__main__":
     parser.add_argument("--config", required=True, help="Path to YAML config file")
     parser.add_argument("--full-analysis", action="store_true",
                         help="Run detailed analysis on best strategy")
+    parser.add_argument("--model-type", choices=["gru", "tcn"], default="gru",
+                        help="Deep learning model to use (default: gru)")
     args = parser.parse_args()
-    main(args.config, full_analysis=args.full_analysis)
+    main(args.config, full_analysis=args.full_analysis, model_type=args.model_type)

@@ -15,7 +15,7 @@ model:
   hidden_size: 256
   num_layers: 1
   dropout: 0.1
-  bidirectional: true
+  bidirectional: false
   attention_size: 64
 
 # Training
