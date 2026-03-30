@@ -12,7 +12,7 @@ class SepsisDataset(Dataset):
     For each patient hour, creates a window of the past seq_length hours.
     Early hours (fewer than seq_length available) are left-padded with zeros.
 
-    All windows are pre-computed in __init__ for fast __getitem__ access.
+    Uses per-patient numpy arrays with fast __getitem__ indexing.
     """
 
     def __init__(
@@ -32,51 +32,47 @@ class SepsisDataset(Dataset):
         self.feature_columns = list(feature_columns)
         self.num_features = len(self.feature_columns)
 
-        # Count total samples first
-        total_samples = sum(len(df) for df in patients.values())
+        # Convert DataFrames to numpy once; pre-pad each patient for O(1) getitem
+        self.patient_data = []  # list of (features_padded, labels, pid)
+        self.samples = []       # list of (patient_idx, hour)
 
-        # Pre-allocate tensors for all windows
-        self.all_features = torch.zeros(
-            (total_samples, seq_length, self.num_features), dtype=torch.float32
-        )
-        self.all_labels = torch.zeros(total_samples, dtype=torch.float32)
-        self.all_masks = torch.zeros(
-            (total_samples, seq_length), dtype=torch.float32
-        )
-        self.sample_pids = []
-        self.sample_hours = []
-
-        idx = 0
         for pid, df in patients.items():
             feat = df[self.feature_columns].values.astype(np.float32)
             labels = df[label_column].values.astype(np.float32)
 
+            # Pre-pad with seq_length-1 zeros so window extraction is a simple slice
+            pad = np.zeros((seq_length - 1, self.num_features), dtype=np.float32)
+            feat_padded = np.concatenate([pad, feat], axis=0)
+
+            patient_idx = len(self.patient_data)
+            self.patient_data.append((feat_padded, labels, pid))
+
             for hour in range(len(df)):
-                start = max(0, hour + 1 - seq_length)
-                end = hour + 1
-                window = feat[start:end]
-                actual_len = window.shape[0]
-                pad_len = seq_length - actual_len
-
-                # Write directly into pre-allocated tensor
-                self.all_features[idx, pad_len:] = torch.from_numpy(window.copy())
-                self.all_labels[idx] = float(labels[hour])
-                self.all_masks[idx, pad_len:] = 1.0
-
-                self.sample_pids.append(pid)
-                self.sample_hours.append(hour)
-                idx += 1
+                self.samples.append((patient_idx, hour))
 
     def __len__(self):
-        return len(self.sample_pids)
+        return len(self.samples)
 
     def __getitem__(self, idx):
+        patient_idx, hour = self.samples[idx]
+        feat_padded, labels, pid = self.patient_data[patient_idx]
+
+        # Simple slice — no branching, no concatenation
+        window = feat_padded[hour:hour + self.seq_length]
+        label = labels[hour]
+
+        # Mask: 1 where real data, 0 where padding
+        actual_len = min(hour + 1, self.seq_length)
+        mask = np.ones(self.seq_length, dtype=np.float32)
+        if actual_len < self.seq_length:
+            mask[:self.seq_length - actual_len] = 0.0
+
         return (
-            self.all_features[idx],    # (seq_length, num_features)
-            self.all_labels[idx],      # scalar
-            self.all_masks[idx],       # (seq_length,)
-            self.sample_pids[idx],     # str
-            self.sample_hours[idx],    # int
+            torch.from_numpy(window),
+            torch.tensor(label, dtype=torch.float32),
+            torch.from_numpy(mask),
+            pid,
+            hour,
         )
 
 
