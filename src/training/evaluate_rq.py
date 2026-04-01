@@ -329,6 +329,248 @@ def generate_rq_summary(tcn_metrics, lgb_metrics, ensemble_metrics,
     print(f"  Saved RQ summary to {save_path}")
 
 
+def load_tcn_predictions(config, val_processed, feature_columns, seq_length=24):
+    """Load trained TCN and generate validation predictions."""
+    import torch
+    from src.models.tcn import TCNWithAttention
+    from src.data.dataset import SepsisDataset
+    from torch.utils.data import DataLoader
+
+    # Load model
+    checkpoint_path = os.path.join(config["output"]["model_dir"], "tcn", "best.pt")
+    if not os.path.exists(checkpoint_path):
+        print(f"  ERROR: TCN checkpoint not found at {checkpoint_path}")
+        return None
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model = TCNWithAttention(
+        input_size=config["model"]["input_size"],
+        hidden_size=config["model"]["hidden_size"],
+        num_layers=config["model"]["num_layers"],
+        dropout=config["model"]["dropout"],
+        kernel_size=config["model"].get("kernel_size", 3),
+        attention_size=config["model"].get("attention_size", 64),
+    )
+    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
+    model.load_state_dict(checkpoint["model_state_dict"])
+    model.to(device)
+    model.eval()
+
+    # Create validation dataset
+    val_dataset = SepsisDataset(val_processed, seq_length=seq_length)
+    val_loader = DataLoader(val_dataset, batch_size=256, shuffle=False, num_workers=0)
+
+    all_probs, all_labels, all_pids, all_hours = [], [], [], []
+    with torch.no_grad():
+        for features, labels, masks, pids, hours in val_loader:
+            features = features.to(device)
+            masks = masks.to(device)
+            logits, _ = model(features, padding_mask=masks)
+            probs = torch.sigmoid(logits).cpu().numpy()
+            all_probs.extend(probs.tolist())
+            all_labels.extend(labels.numpy().tolist())
+            all_pids.extend(pids)
+            all_hours.extend(hours if isinstance(hours, list) else hours.tolist())
+
+    return {
+        "probs": np.array(all_probs),
+        "labels": np.array(all_labels),
+        "pids": all_pids,
+        "hours": all_hours,
+        "threshold": checkpoint.get("threshold", 0.5),
+    }
+
+
+def load_lgbm_predictions(config, val_processed, feature_columns):
+    """Load trained LightGBM and generate validation predictions."""
+    from src.models.lightgbm_model import LightGBMBaseline, prepare_baseline_data
+
+    model_path = os.path.join(config["output"]["model_dir"], "lightgbm", "lightgbm_improved.pkl")
+    if not os.path.exists(model_path):
+        print(f"  ERROR: LightGBM model not found at {model_path}")
+        return None
+
+    model = LightGBMBaseline.load(model_path)
+    X_val, y_val, val_pids, val_hours = prepare_baseline_data(
+        val_processed, feature_columns, enhanced=True)
+
+    probs = model.predict_proba(X_val)
+
+    # Find best threshold
+    best_util, best_thr = float("-inf"), 0.5
+    for t in np.arange(0.1, 0.91, 0.05):
+        preds = (probs >= t).astype(int).tolist()
+        util = compute_utility_score(y_val.tolist(), preds, val_pids, val_hours)
+        if util > best_util:
+            best_util = util
+            best_thr = t
+
+    return {
+        "probs": probs,
+        "labels": y_val,
+        "pids": val_pids,
+        "hours": val_hours,
+        "threshold": best_thr,
+    }
+
+
+def compute_model_metrics(result):
+    """Compute AUPRC, AUROC, and utility for a model's predictions."""
+    auprc = average_precision_score(result["labels"], result["probs"])
+    auroc = roc_auc_score(result["labels"], result["probs"])
+
+    best_util = float("-inf")
+    for t in np.arange(0.1, 0.91, 0.05):
+        preds = (result["probs"] >= t).astype(int).tolist()
+        util = compute_utility_score(
+            result["labels"].tolist(), preds, result["pids"], result["hours"])
+        best_util = max(best_util, util)
+
+    return {"auprc": auprc, "auroc": auroc, "utility": best_util}
+
+
+def compute_ensemble_predictions(tcn_result, lgbm_result):
+    """Create ensemble predictions using max strategy."""
+    # Use the shared labels/pids/hours (from LightGBM since it has same validation data)
+    # Note: TCN and LightGBM may have different sample counts due to windowing
+    # Use LightGBM's structure as base and match TCN predictions by pid+hour
+    probs = np.maximum(tcn_result["probs"], lgbm_result["probs"])
+    return {
+        "probs": probs,
+        "labels": lgbm_result["labels"],
+        "pids": lgbm_result["pids"],
+        "hours": lgbm_result["hours"],
+    }
+
+
+def main(config_path, rq=None, output_dir="outputs/rq_analysis"):
+    """Run RQ evaluation pipeline."""
+    import yaml
+    from src.data.cache import get_cache_path, is_cache_valid, load_preprocessed
+    from src.data.preprocessing import TARGET
+
+    with open(config_path) as f:
+        config = yaml.safe_load(f)
+
+    os.makedirs(output_dir, exist_ok=True)
+
+    # Load cached preprocessed data
+    cache_path = get_cache_path(config)
+    if not is_cache_valid(cache_path, config["data"]["raw_dir"]):
+        print("ERROR: No preprocessed cache found. Run training first.")
+        return
+
+    print("Loading preprocessed data from cache...")
+    cached = load_preprocessed(cache_path)
+    val_processed = cached["val_processed"]
+
+    sample_df = next(iter(val_processed.values()))
+    feature_columns = [c for c in sample_df.columns if c != TARGET]
+
+    # Load model predictions
+    print("\nLoading TCN predictions...")
+    tcn_result = load_tcn_predictions(
+        config, val_processed, feature_columns,
+        seq_length=config["data"]["seq_length"])
+
+    print("Loading LightGBM predictions...")
+    lgbm_result = load_lgbm_predictions(config, val_processed, feature_columns)
+
+    if tcn_result is None or lgbm_result is None:
+        print("ERROR: Both models must be trained before running RQ evaluation.")
+        return
+
+    # Compute metrics
+    print("\nComputing metrics...")
+    tcn_metrics = compute_model_metrics(tcn_result)
+    lgbm_metrics = compute_model_metrics(lgbm_result)
+    print(f"  TCN  — AUPRC: {tcn_metrics['auprc']:.4f}, AUROC: {tcn_metrics['auroc']:.4f}, Utility: {tcn_metrics['utility']:.4f}")
+    print(f"  LGBM — AUPRC: {lgbm_metrics['auprc']:.4f}, AUROC: {lgbm_metrics['auroc']:.4f}, Utility: {lgbm_metrics['utility']:.4f}")
+
+    # RQ1: PR curves and model agreement
+    if rq is None or rq == 1:
+        print("\n--- RQ1: Model Complementarity ---")
+
+        # PR curves
+        model_results = {
+            "TCN": (tcn_result["labels"], tcn_result["probs"]),
+            "LightGBM": (lgbm_result["labels"], lgbm_result["probs"]),
+        }
+
+        # Ensemble (max strategy) — only if same samples
+        if len(tcn_result["probs"]) == len(lgbm_result["probs"]):
+            ens_result = compute_ensemble_predictions(tcn_result, lgbm_result)
+            ens_metrics = compute_model_metrics(ens_result)
+            model_results["Ensemble"] = (ens_result["labels"], ens_result["probs"])
+            print(f"  Ensemble — AUPRC: {ens_metrics['auprc']:.4f}, AUROC: {ens_metrics['auroc']:.4f}, Utility: {ens_metrics['utility']:.4f}")
+        else:
+            ens_metrics = {"auprc": 0.0, "auroc": 0.0, "utility": 0.0}
+            print("  Warning: TCN and LightGBM have different sample counts, skipping ensemble")
+
+        plot_pr_curves(model_results, os.path.join(output_dir, "pr_curves.png"))
+        plot_roc_curves(model_results, os.path.join(output_dir, "roc_curves.png"))
+
+        # Patient-level agreement
+        if len(tcn_result["probs"]) == len(lgbm_result["probs"]):
+            threshold = max(tcn_result["threshold"], lgbm_result["threshold"])
+            agreement = patient_level_agreement(
+                tcn_result["probs"], lgbm_result["probs"],
+                tcn_result["labels"], tcn_result["pids"],
+                tcn_result["hours"], threshold)
+            plot_agreement_matrix(agreement, "TCN", "LightGBM",
+                                  os.path.join(output_dir, "agreement_matrix.png"))
+            print(f"  Agreement: both={agreement['both']}, TCN-only={agreement['a_only']}, "
+                  f"LGBM-only={agreement['b_only']}, neither={agreement['neither']}")
+        else:
+            agreement = {"both": 0, "a_only": 0, "b_only": 0, "neither": 0, "total_sepsis": 0}
+
+    # RQ2: Feature ablation (time-since features)
+    rq2_results = None
+    if rq is None or rq == 2:
+        print("\n--- RQ2: Lab Ordering Patterns (Feature Ablation) ---")
+        train_processed = cached["train_processed"]
+        rq2_results = rq2_feature_ablation(
+            train_processed, val_processed, feature_columns)
+        w = rq2_results["with_timesince"]
+        wo = rq2_results["without_timesince"]
+        d = rq2_results["delta"]
+        print(f"  With time-since:    AUPRC={w['auprc']:.4f}, Utility={w['utility']:.4f} ({w['n_features']} features)")
+        print(f"  Without time-since: AUPRC={wo['auprc']:.4f}, Utility={wo['utility']:.4f} ({wo['n_features']} features)")
+        print(f"  Delta:              AUPRC={d['auprc']:+.4f}, Utility={d['utility']:+.4f}")
+
+    # RQ3: Summary is in the metrics comparison above
+    if rq is None or rq == 3:
+        print("\n--- RQ3: Temporal Ordering (TCN) vs Aggregate Statistics (LightGBM) ---")
+        print(f"  TCN (sequential):     AUPRC={tcn_metrics['auprc']:.4f}, Utility={tcn_metrics['utility']:.4f}")
+        print(f"  LightGBM (aggregate): AUPRC={lgbm_metrics['auprc']:.4f}, Utility={lgbm_metrics['utility']:.4f}")
+        gap = lgbm_metrics['utility'] - tcn_metrics['utility']
+        print(f"  LightGBM advantage:   {gap:+.4f} utility")
+
+    # Generate summary report
+    if rq is None:
+        generate_rq_summary(
+            tcn_metrics, lgbm_metrics,
+            ens_metrics if 'ens_metrics' in dir() else {"auprc": 0, "auroc": 0, "utility": 0},
+            agreement if 'agreement' in dir() else {"both": 0, "a_only": 0, "b_only": 0, "neither": 0, "total_sepsis": 0},
+            rq2_results,
+            os.path.join(output_dir, "rq_summary.md"))
+
+    # Save raw metrics as JSON
+    metrics_json = {
+        "tcn": tcn_metrics,
+        "lightgbm": lgbm_metrics,
+    }
+    if 'ens_metrics' in dir():
+        metrics_json["ensemble"] = ens_metrics
+    if rq2_results:
+        metrics_json["rq2_ablation"] = rq2_results
+
+    with open(os.path.join(output_dir, "metrics.json"), "w") as f:
+        json.dump(metrics_json, f, indent=2)
+    print(f"\n  Saved metrics to {os.path.join(output_dir, 'metrics.json')}")
+    print("\nDone.")
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="RQ-specific evaluation")
     parser.add_argument("--config", required=True, help="Config YAML file")
@@ -337,6 +579,4 @@ if __name__ == "__main__":
     parser.add_argument("--output-dir", default="outputs/rq_analysis",
                         help="Output directory for RQ artifacts")
     args = parser.parse_args()
-    print(f"RQ evaluation requires trained TCN and LightGBM models.")
-    print(f"Run training first, then use this script to generate comparisons.")
-    print(f"Output will be saved to {args.output_dir}/")
+    main(args.config, rq=args.rq, output_dir=args.output_dir)
