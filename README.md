@@ -1,4 +1,4 @@
-# Sepsis Early Warning System
+# Sepsis Forecasting Using ICU Data
 
 Machine learning pipeline for early sepsis prediction in ICU patients using the [PhysioNet/CinC Challenge 2019](https://physionet.org/content/challenge-2019/1.0.0/) dataset. The primary objective is **patient-level sepsis prediction** — given a patient's ICU stay, does this patient develop sepsis, and can we flag them before onset?
 
