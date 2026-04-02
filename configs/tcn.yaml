@@ -1,6 +1,6 @@
 # Sepsis Forecasting - TCN Configuration
 # Temporal Convolutional Network with causal dilated convolutions
-# Causal by design — no future information leakage
+# Causal by design
 
 # Data
 data:

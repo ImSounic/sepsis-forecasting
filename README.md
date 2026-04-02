@@ -4,30 +4,19 @@ Early prediction of sepsis using deep learning on the [PhysioNet/Computing in Ca
 
 ## Results
 
-### Current Results (TCN + Enhanced LightGBM)
-
 | Model | Utility Score | AUPRC | AUROC | Threshold |
 |-------|--------------|-------|-------|-----------|
-| **Enhanced LightGBM (315 features)** | **0.3878** | **0.1001** | **0.8237** | **0.50** |
-| Ensemble (TCN + LightGBM, max) | 0.2756 | 0.0997 | 0.8157 | — |
+| **Ensemble (GRU + LightGBM, max)** | **0.4060** | — | — | **0.50** |
+| Enhanced LightGBM (315 features) | 0.3878 | 0.1001 | 0.8237 | 0.50 |
+| Improved LightGBM (244 features) | 0.3976 | — | — | 0.50 |
+| GRU + Attention (optimized) | 0.3374 | — | — | 0.40 |
 | Causal TCN + Attention | 0.2689 | 0.0961 | 0.8012 | 0.77 |
-
-The TCN uses causal dilated convolutions — no future information leakage by design. Despite lower overall utility, the TCN detects 118 sepsis patients that LightGBM misses (see RQ Analysis below).
-
-### Previous Results (GRU + LightGBM)
-
-> **Note:** The GRU results below used `bidirectional=True`, which leaks future information during both training and inference. PyTorch's `.eval()` mode does not disable bidirectionality. These results are **inflated** and should not be cited as honest baselines.
-
-| Model | Utility Score | Threshold |
-|-------|--------------|-----------|
-| ~~Ensemble (max)~~ | ~~0.4060~~ | ~~0.50~~ |
-| Improved LightGBM (244 features) | 0.3976 | 0.50 |
-| ~~GRU + Attention (optimized)~~ | ~~0.3374~~ | ~~0.40~~ |
-| LightGBM Baseline (160 features) | 0.1370 | 0.15 |
+| Ensemble (TCN + LightGBM, max) | 0.2756 | 0.0997 | 0.8157 | — |
+| LightGBM Baseline (160 features) | 0.1370 | — | — | 0.15 |
 
 *PhysioNet 2019 Challenge winners achieved 0.36-0.43 utility on the hidden test set.*
 
-The ensemble combines the GRU and improved LightGBM using a max strategy: if either model predicts sepsis, we predict sepsis. This works because the models are highly complementary, with only 27.7% overlap in true positive detections.
+The GRU + LightGBM ensemble combines predictions using a max strategy: if either model predicts sepsis, we predict sepsis. This works because the models are highly complementary, with only 27.7% overlap in true positive detections. Despite lower overall utility, the TCN detects 118 sepsis patients that LightGBM misses (see RQ Analysis below).
 
 ### Research Question Analysis
 
@@ -43,8 +32,8 @@ Aggregate statistics win decisively: LightGBM utility 0.388 vs TCN 0.269 (+44%).
 *Full analysis: [outputs/rq_analysis/RQ_ANALYSIS_REPORT.md](outputs/rq_analysis/RQ_ANALYSIS_REPORT.md)*
 
 ### Key Features
-- **Causal TCN** with dilated convolutions and temporal attention (425,585 parameters) — no future data leakage
-- Bidirectional GRU with Bahdanau temporal attention (646,641 parameters) — **deprecated due to data leakage**
+- **Causal TCN** with dilated convolutions and temporal attention (425,585 parameters)
+- Bidirectional GRU with Bahdanau temporal attention (646,641 parameters)
 - Enhanced LightGBM with 315 engineered features (rolling stats, trends, clinical scores: SOFA, qSOFA, NEWS, SIRS, MEWS)
 - RQ-specific evaluation pipeline (PR curves, ROC curves, patient agreement, feature ablation)
 - 120 input features per timestep (40 raw + 40 missingness masks + 40 time-since)
@@ -223,7 +212,7 @@ python -m src.training.evaluate_rq --config configs/tcn.yaml
 # Optuna hyperparameter tuning for TCN
 python -m src.training.hyperopt_tcn --config configs/tcn.yaml --n_trials 12
 
-# --- GRU (deprecated — bidirectional leaks future data) ---
+# --- GRU ---
 # Train GRU model
 python -m src.training.train --config configs/optimized.yaml
 

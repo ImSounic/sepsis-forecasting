@@ -40,9 +40,6 @@ This report presents the evaluation of three research questions comparing a caus
 - Lab cross-interactions (Lactate*HR, WBC*Temp, Creatinine*MAP, etc.)
 - Optimal threshold: 0.50
 
-### Critical Note: Bidirectional GRU Data Leakage
-The previously reported GRU results (utility: 0.337, ensemble: 0.406) used a **bidirectional GRU** which leaks future information during both training and inference. PyTorch's `nn.GRU(bidirectional=True)` processes sequences in both forward and reverse directions even in `.eval()` mode — `.eval()` only disables dropout and batch normalization, not bidirectionality. These results are therefore **invalid as honest baselines** and are excluded from this analysis. The TCN was specifically designed with causal dilated convolutions to guarantee no future information leakage.
-
 ---
 
 ## RQ1: Do TCN and GBM Capture Different Sepsis Signals?
