@@ -10,6 +10,9 @@ Machine learning pipeline for early sepsis prediction in ICU patients using the 
 2. [Dataset](#dataset)
 3. [Approach & Evolution](#approach--evolution)
 4. [Feature Engineering](#feature-engineering)
+   - [SOFA](#sofa--sequential-organ-failure-assessment)
+   - [qSOFA](#qsofa--quick-sofa)
+   - [NEWS](#news--national-early-warning-score)
 5. [Models](#models)
 6. [Results](#results)
 7. [Interpretation](#interpretation)
@@ -118,6 +121,73 @@ Computed on **un-normalized raw values** to preserve clinical meaning:
 | Feature differentials | 16 | 1h and 6h deltas for key variables (Lactate, WBC, Temp, HR, MAP, Resp, pH, etc.) |
 
 **Design principle**: SOFA/qSOFA/NEWS are computed before normalization since these clinical scores rely on absolute values (e.g., qSOFA flags Resp > 22 breaths/min, not a normalized z-score). The `norm_stats` (mean/std) are passed through the pipeline for un-normalization before scoring.
+
+---
+
+#### SOFA — Sequential Organ Failure Assessment
+
+The gold-standard clinical score used in hospitals to define and track organ dysfunction. A SOFA score increase of ≥ 2 points above baseline is literally part of the **Sepsis-3 clinical definition** (2016 consensus). It assesses 6 organ systems, each scored 0–4.
+
+**Normal: 0. Score ≥ 2 = possible sepsis. Score > 10 = high mortality risk.**
+
+| Feature | Organ System | Variable Used | Scoring Logic |
+|---|---|---|---|
+| `sofa_cardiovascular` | Cardiovascular | MAP (mmHg) | 0 = MAP ≥ 70; 1 = MAP < 70 |
+| `sofa_renal` | Renal (kidney) | Creatinine (mg/dL) | 0 = <1.2; 1 = 1.2–1.9; 2 = 2.0–3.4; 3 = 3.5–4.9; 4 = ≥5.0 |
+| `sofa_hepatic` | Hepatic (liver) | Bilirubin_total (mg/dL) | 0 = <1.2; 1 = 1.2–1.9; 2 = 2.0–5.9; 3 = 6.0–11.9; 4 = ≥12 |
+| `sofa_coagulation` | Coagulation | Platelets (×10³/µL) | 0 = ≥150; 1 = 100–149; 2 = 50–99; 3 = 20–49; 4 = <20 |
+| `sofa_respiratory` | Respiratory | SaO2/FiO2 proxy ratio | 0 = ≥400; 1 = 300–399; 2 = 200–299; 3 = 100–199; 4 = <100 |
+| `sofa_total` | All systems | Sum of above | 0–20+ |
+
+> **Dataset limitation**: True SOFA uses the PaO2/FiO2 (P/F) ratio for the respiratory component, but the PhysioNet dataset provides PaCO2 (not PaO2). We use the SaO2/FiO2 (SF) ratio as a validated proxy. The neurological component (GCS) is also absent from the dataset and is omitted.
+
+---
+
+#### qSOFA — Quick SOFA
+
+A simplified 3-point bedside screening tool that requires no lab results — just vitals. Designed to rapidly identify patients at risk of sepsis-related deterioration. Any **2 of 3 criteria = positive screen** for possible sepsis.
+
+**Normal: 0. Score ≥ 2 = suspect sepsis.**
+
+| Feature | Criterion | Threshold | Clinical Meaning |
+|---|---|---|---|
+| `qsofa_sbp` | Low blood pressure | SBP ≤ 100 mmHg | Hemodynamic compromise / early shock |
+| `qsofa_resp` | Tachypnea | Resp ≥ 22 breaths/min | Compensatory hyperventilation for acidosis |
+| `qsofa_total` | Sum of above | 0–2 | Overall bedside screen score |
+
+> **Dataset limitation**: The 3rd criterion is altered mental status (GCS < 15), which is the strongest individual predictor. It is not present in this dataset, so our qSOFA ranges 0–2 instead of 0–3. The SBP and Resp criteria are still independently validated sepsis predictors.
+
+---
+
+#### NEWS — National Early Warning Score
+
+Developed by the UK Royal College of Physicians and mandated across all NHS hospitals. NEWS assigns weighted points based on how far each vital deviates from normal — in **either direction** (too low or too high both score points). A NEWS ≥ 5 triggers a rapid clinical review; NEWS ≥ 7 triggers immediate ICU transfer consideration.
+
+**Normal: 0. Score ≥ 5 = urgent review. Score ≥ 7 = consider ICU.**
+
+| Feature | Vital | Normal Range | Scoring |
+|---|---|---|---|
+| `news_hr` | Heart Rate (bpm) | 51–90 | ≤40 or ≥131 → 3pts; 111–130 → 2pts; 41–50 or 91–110 → 1pt; 51–90 → 0 |
+| `news_temp` | Temperature (°C) | 36.1–38.0 | ≤35.0 → 3pts; ≥39.1 → 2pts; 35.1–36.0 or 38.1–39.0 → 1pt; 36.1–38.0 → 0 |
+| `news_resp` | Respiratory Rate (bpm) | 12–20 | <8 or >25 → 3pts; 21–24 → 2pts; 9–11 → 1pt; 12–20 → 0 |
+| `news_total` | Sum of above | — | 0–9 (partial; full NEWS-2 = 0–20) |
+
+> **Dataset limitation**: Full NEWS-2 also scores O2 saturation, blood pressure, level of consciousness, and whether the patient is on supplemental O2, for a maximum of 20 points. We implement the 3 vitals available in the dataset with the correct scoring bands. SBP scoring is captured separately by qSOFA.
+
+---
+
+#### Why These Clinical Features Add Genuine Signal
+
+The core benefit is that these scores encode **validated clinical thresholds** that the raw z-scored features cannot represent:
+
+| Raw Signal | Problem | Clinical Feature | Benefit |
+|---|---|---|---|
+| Creatinine = 3.2 mg/dL | Model doesn't know if that's dangerous | `sofa_renal` = 2 | Directly encodes "moderate renal dysfunction" |
+| HR = 118 bpm (z-score = 1.4) | Is 1.4 standard deviations bad? | `news_hr` = 1 | Absolute deviation from clinical normal encoded |
+| SBP = 98, Resp = 23 | Two separate z-scored features | `qsofa_total` = 2 | Positive sepsis screen — combined criterion |
+| All values z-scored | Normalization destroys thresholds like "SBP < 100" | Computed on raw values | Preserves clinically validated cut-points |
+
+Essentially: these features give the model the same decision rules that clinicians have refined over decades of research, so it does not have to rediscover them from scratch in 1.3 million ICU timesteps.
 
 ---
 
