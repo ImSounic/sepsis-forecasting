@@ -225,7 +225,7 @@ Input (batch, 24, 120)
 ```
 
 - **Parameters**: 646,641
-- **Training**: ~70 min on NVIDIA RTX PRO 1000 (Blackwell, sm_128)
+- **Training**: ~8 hours on NVIDIA RTX PRO 1000 (Blackwell, sm_128)
 - **PyTorch**: nightly cu128 build required (official releases lack sm_128 support for Blackwell)
 - **Best config**: hidden=256, lr=0.00095, batch=32, bidirectional=True, window=24h
 
@@ -241,41 +241,41 @@ Input (batch, 24, 120)
 
 #### Standalone Models — Best Threshold per Model
 
-| Model | Threshold | Patient F1 | AUROC | Sensitivity | Specificity | Precision | Utility |
-|---|---|---|---|---|---|---|---|
-| LightGBM (unbalance_big) | 0.75 | 0.4774 | 0.8433 | 0.4148 | 0.9735 | 0.5621 | 0.2986 |
-| LightGBM (spw_5) | 0.38 | 0.4759 | 0.8615 | 0.4105 | 0.9743 | 0.5663 | 0.2880 |
-| LightGBM (spw_10_big) | 0.48 | 0.4761 | 0.8603 | 0.4127 | 0.9737 | 0.5625 | 0.2909 |
-| LightGBM (spw_20_big) | 0.58 | 0.4662 | 0.8543 | 0.4214 | 0.9684 | 0.5216 | 0.2985 |
-| LightGBM (spw_20) | 0.63 | 0.4661 | 0.8580 | 0.4279 | 0.9666 | 0.5117 | 0.2976 |
-| LightGBM (spw_50) | 0.76 | 0.4699 | 0.8478 | 0.4520 | 0.9614 | 0.4894 | 0.3203 |
-| LightGBM (spw_100) | 0.87 | 0.4628 | 0.8380 | 0.3668 | 0.9821 | 0.6269 | 0.2674 |
-| LightGBM (spw_10) | 0.44 | 0.4514 | 0.8615 | 0.4869 | 0.9451 | 0.4208 | 0.3173 |
-| LightGBM (unbalance) | 0.79 | 0.4587 | 0.8451 | 0.4061 | 0.9701 | 0.5269 | 0.2909 |
-| GRU (patient_f1) | 0.34 | 0.4634 | 0.8419 | 0.4629 | 0.9562 | 0.4639 | 0.2900 |
+| Model | Threshold | Patient F1 | AUROC | AUPRC | Sensitivity | Specificity | Precision | Utility |
+|---|---|---|---|---|---|---|---|---|
+| LightGBM (unbalance_big) | 0.75 | 0.4774 | 0.8433 | 0.5032 | 0.4148 | 0.9735 | 0.5621 | 0.2986 |
+| LightGBM (spw_5) | 0.38 | 0.4759 | 0.8615 | 0.4827 | 0.4105 | 0.9743 | 0.5663 | 0.2880 |
+| LightGBM (spw_10_big) | 0.48 | 0.4761 | 0.8603 | 0.4969 | 0.4127 | 0.9737 | 0.5625 | 0.2909 |
+| LightGBM (spw_20_big) | 0.58 | 0.4662 | 0.8543 | 0.4923 | 0.4214 | 0.9684 | 0.5216 | 0.2985 |
+| LightGBM (spw_20) | 0.63 | 0.4661 | 0.8580 | 0.4726 | 0.4279 | 0.9666 | 0.5117 | 0.2976 |
+| LightGBM (spw_50) | 0.76 | 0.4699 | 0.8478 | 0.4793 | 0.4520 | 0.9614 | 0.4894 | 0.3203 |
+| LightGBM (spw_100) | 0.87 | 0.4628 | 0.8380 | 0.4775 | 0.3668 | 0.9821 | 0.6269 | 0.2674 |
+| LightGBM (spw_10) | 0.44 | 0.4514 | 0.8615 | 0.4692 | 0.4869 | 0.9451 | 0.4208 | 0.3173 |
+| LightGBM (unbalance) | 0.79 | 0.4587 | 0.8451 | 0.4787 | 0.4061 | 0.9701 | 0.5269 | 0.2909 |
+| GRU (patient_f1) | 0.34 | 0.4634 | 0.8419 | 0.4364 | 0.4629 | 0.9562 | 0.4639 | 0.2900 |
 
 #### Best GRU + LightGBM Cross-Model Ensembles
 
 Weighted probability average: `p_final = w_GRU × p_GRU + (1-w_GRU) × p_LGB`
 
-| Model | GRU/LGB Weights | Threshold | Patient F1 | AUROC | Sensitivity | Specificity | Precision | Utility |
-|---|---|---|---|---|---|---|---|---|
-| **★ GRU + spw_50** | **0.3 / 0.7** | **0.62** | **0.4968** | **0.8573** | **0.4258** | **0.9764** | **0.5963** | **0.3029** |
-| GRU + spw_10_big | 0.3 / 0.7 | 0.43 | 0.4840 | 0.8688 | 0.3974 | 0.9800 | 0.6190 | 0.2832 |
-| GRU + unbalance_big | 0.3 / 0.7 | 0.59 | 0.4857 | 0.8528 | 0.4279 | 0.9726 | 0.5616 | 0.2992 |
-| GRU + spw_100 | 0.3 / 0.7 | 0.66 | 0.4872 | 0.8477 | 0.4367 | 0.9709 | 0.5510 | 0.3049 |
-| GRU + spw_50 | 0.5 / 0.5 | 0.50 | 0.4835 | 0.8634 | 0.4476 | 0.9669 | 0.5256 | 0.3073 |
-| GRU + spw_5 | 0.3 / 0.7 | 0.35 | 0.4838 | 0.8728 | 0.4083 | 0.9771 | 0.5937 | 0.2831 |
-| GRU + spw_10 | 0.5 / 0.5 | 0.39 | 0.4750 | 0.8715 | 0.4258 | 0.9700 | 0.5372 | 0.2907 |
+| Model | GRU/LGB Weights | Threshold | Patient F1 | AUROC | AUPRC | Sensitivity | Specificity | Precision | Utility |
+|---|---|---|---|---|---|---|---|---|---|
+| **★ GRU + spw_50** | **0.3 / 0.7** | **0.62** | **0.4968** | **0.8573** | **0.5032** | **0.4258** | **0.9764** | **0.5963** | **0.3029** |
+| GRU + spw_10_big | 0.3 / 0.7 | 0.43 | 0.4840 | 0.8688 | 0.5151 | 0.3974 | 0.9800 | 0.6190 | 0.2832 |
+| GRU + unbalance_big | 0.3 / 0.7 | 0.59 | 0.4857 | 0.8528 | 0.5055 | 0.4279 | 0.9726 | 0.5616 | 0.2992 |
+| GRU + spw_100 | 0.3 / 0.7 | 0.66 | 0.4872 | 0.8477 | 0.4923 | 0.4367 | 0.9709 | 0.5510 | 0.3049 |
+| GRU + spw_50 | 0.5 / 0.5 | 0.50 | 0.4835 | 0.8634 | 0.4950 | 0.4476 | 0.9669 | 0.5256 | 0.3073 |
+| GRU + spw_5 | 0.3 / 0.7 | 0.35 | 0.4838 | 0.8728 | 0.5203 | 0.4083 | 0.9771 | 0.5937 | 0.2831 |
+| GRU + spw_10 | 0.5 / 0.5 | 0.39 | 0.4750 | 0.8715 | 0.5007 | 0.4258 | 0.9700 | 0.5372 | 0.2907 |
 
 #### Best LightGBM-Only Ensembles (Probability Average)
 
-| Ensemble | Threshold | Patient F1 | AUROC | Sensitivity | Specificity | Precision | Utility |
-|---|---|---|---|---|---|---|---|
-| avg (spw_5 + spw_50) | 0.55 | 0.4874 | 0.8549 | 0.4214 | 0.9748 | 0.5778 | 0.2988 |
-| avg (spw_20 + spw_50) | 0.70 | 0.4824 | 0.8548 | 0.4039 | 0.9778 | 0.5987 | 0.2906 |
-| avg (spw_10 + spw_5) | 0.45 | 0.4814 | 0.8658 | 0.3952 | 0.9798 | 0.6156 | 0.2823 |
-| avg (spw_5 + unbalance_big) | 0.55 | 0.4807 | 0.8527 | 0.3952 | 0.9796 | 0.6136 | 0.2823 |
+| Ensemble | Threshold | Patient F1 | AUROC | AUPRC | Sensitivity | Specificity | Precision | Utility |
+|---|---|---|---|---|---|---|---|---|
+| avg (spw_5 + spw_50) | 0.55 | 0.4874 | 0.8549 | 0.5084 | 0.4214 | 0.9748 | 0.5778 | 0.2988 |
+| avg (spw_20 + spw_50) | 0.70 | 0.4824 | 0.8548 | 0.4965 | 0.4039 | 0.9778 | 0.5987 | 0.2906 |
+| avg (spw_10 + spw_5) | 0.45 | 0.4814 | 0.8658 | 0.5081 | 0.3952 | 0.9798 | 0.6156 | 0.2823 |
+| avg (spw_5 + unbalance_big) | 0.55 | 0.4807 | 0.8527 | 0.5073 | 0.3952 | 0.9796 | 0.6136 | 0.2823 |
 
 ### Best Model: Full Breakdown
 **Ensemble 0.3/0.7 (GRU + LightGBM spw_50) at threshold 0.62**
@@ -509,8 +509,9 @@ Raw .psv files (40 variables, variable-length ICU stays)
 | Task | Time |
 |---|---|
 | Data preprocessing (first run) | ~15 min |
-| LightGBM training (500 trees, 297 features, 1.3M samples) | ~5 min |
-| GRU training (patient-F1 optimized, ~70 epochs) | ~70 min |
+| LightGBM training (500 trees, 297 features, 1.3M samples) | ~1 hour |
+| GRU training (patient-F1 optimized) | ~8 hours |
+| Optuna hyperparameter search (12 trials × 8h per trial) | ~96 hours total |
 | Full threshold sweep (all 118 model configs) | ~20 min |
 | SHAP analysis (1,000 background + 1,000 test samples) | ~15 min |
 
