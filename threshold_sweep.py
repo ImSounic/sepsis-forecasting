@@ -163,15 +163,15 @@ def main():
 
         all_preds, all_labels, all_pids_gru, all_hrs_gru = [], [], [], []
         with torch.no_grad():
-            for batch in val_loader:
-                x = batch["features"].to(device)
-                lengths = batch["lengths"].to(device)
-                logits = model(x, lengths).squeeze(-1)
+            for features, labels, masks, pids_b, hours in val_loader:
+                x = features.to(device)
+                padding_mask = masks.to(device)
+                logits, _ = model(x, padding_mask)
                 probs_batch = torch.sigmoid(logits).cpu().numpy()
                 all_preds.extend(probs_batch.tolist())
-                all_labels.extend(batch["labels"].numpy().tolist())
-                all_pids_gru.extend(batch["patient_ids"])
-                all_hrs_gru.extend(batch["hour_indices"].numpy().tolist())
+                all_labels.extend(labels.numpy().tolist())
+                all_pids_gru.extend(pids_b)
+                all_hrs_gru.extend(hours.numpy().tolist())
 
         gru_probs = np.array(all_preds, dtype=np.float32)
         gru_y = np.array(all_labels, dtype=np.float32)

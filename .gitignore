@@ -3,6 +3,11 @@
 CLAUDE.md
 claude.md
 
+# Node.js (used for report generation only — do not commit)
+node_modules/
+package.json
+package-lock.json
+
 # Python virtual environment
 .venv/
 venv/
