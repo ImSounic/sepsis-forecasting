@@ -68,10 +68,22 @@ Input (batch, 24, 120)
   -> Dense (128 -> 1)
 ```
 
-- **Utility**: 0.2689, **Parameters**: 425,585
+- **Parameters**: 425,585
 - **Config**: hidden=128, layers=4, kernel_size=3, dropout=0.2, lr=0.001, batch=256
 - **Training**: 13 epochs (early stopping, best epoch 3), ~30 hours on NVIDIA A16
 - **Receptive field**: 61 timesteps (covers full 24h window)
+
+| Metric | Value |
+|--------|-------|
+| Utility | 0.2689 |
+| AUROC | 0.8012 |
+| AUPRC | 0.0961 |
+| Sensitivity | 0.5852 (268/458 sepsis patients) |
+| Specificity | 0.7694 (4,303/5,593 non-sepsis) |
+| Precision | 0.1720 |
+| NPV | 0.9577 |
+| Patient F1 | 0.2659 |
+| Threshold | 0.77 |
 
 ### Enhanced LightGBM
 
@@ -133,7 +145,7 @@ Input (batch, 24, 120)
 - Only 27.7% overlap in true positive detections between models
 - 60.1% of TPs detected in optimal -6h to 0h window
 
-### Patient-Level Performance
+### Patient-Level Performance (TCN, threshold=0.77)
 
 | Category | Patients | Samples | % of Patients |
 |----------|----------|---------|---------------|
